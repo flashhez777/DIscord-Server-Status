@@ -1,38 +1,58 @@
-Discord Global Status Monitor v3.3.3
-====================================
+DISCORD GLOBAL STATUS MONITOR 3.4.1 - BUILD INFO
+=================================================
 
-Release changes:
-- Fixed Python 3.12 runtime discovery when py.exe exists without CPython 3.12.
-- Captures stdout, stderr, exit codes and timeouts for Python, WinGet,
-  Visual Studio discovery, resource compilation and SignTool.
-- Searches PATH, Python registry entries, known install directories and
-  WindowsApps Python Manager package locations.
-- Installs Python install manager via WinGet and provisions CPython 3.12;
-  falls back to the standalone Python.Python.3.12 package.
-- Optional read-only RIPE Atlas backend now uses the latest-per-probe API with
-  a bounded seven-day lookback instead of downloading full measurement history.
-- Keeps Globalping worldwide probes, Discord Statuspage, local endpoint probes
-  and host network telemetry as separately labeled sources.
-- Adds GitHub Actions CI and GitHub-ready README / .txt backend docs.
-- Windows EXE and Python-backed C ABI DLL builds embed the DGSM network icon;
-  the Windows pipeline signs and verifies both with Authenticode.
-- Linux build creates a portable Python zipapp and a CPython-ABI-specific C
-  shared library.
+WINDOWS BUILD AND SIGN PIPELINE (ALIGNED WITH D2 DAMAGE TRACKER)
+---------------------------------------------------------------
+  1. Discover/reuse an x64 CPython 3.11-3.15 installation; provision only if
+     no supported runtime exists. Never send manager commands to legacy py.exe.
+  2. Create a private .build\windows\venv and install requirements-build.txt.
+  3. Read the one canonical version from dgsm_version.py and generate both
+     PyInstaller EXE metadata and Windows DLL RC metadata from templates.
+  4. Build DiscordGlobalStatusMonitor.exe as a one-file console application
+     with DGSM.ico and Windows version information.
+  5. Compile assets\DGSM.rc using Windows SDK rc.exe and link the .res into
+     the CFFI C ABI DLL with the MSVC x64 toolchain.
+  6. Run EXE --help/--version and C ABI DLL smoke tests before signing.
+  7. Find an installed Microsoft Authenticode-valid SignTool; if absent,
+     download Microsoft.Windows.SDK.BuildTools from NuGet into a temporary
+     directory, validate the embedded signtool.exe signature, and clean it up.
+  8. Reuse/create a CurrentUser code-signing certificate or accept a PFX.
+     Local self-signed certs are exported as .cer and trusted only for the
+     current user in Root and TrustedPublisher stores.
+  9. Sign the EXE and DLL using SHA-256 Authenticode. Try DigiCert and Sectigo
+     RFC 3161 timestamping; if both fail, sign without timestamp and report it.
+ 10. Run SignTool verify and Get-AuthenticodeSignature for both files, then
+     re-run native artifact smoke tests after signing.
+ 11. Create the Desktop shortcut, package the signed outputs, emit SHA-256
+     manifests and clean temporary build files unless -KeepBuildCache is set.
 
-Offline tests: python3 -m unittest -v test_discord_server_global_status.py
-Windows build target: CPython 3.12 x64 + MSVC x64 + Windows SDK.
+UAC / USER PROFILE
+------------------
+Only Microsoft installers that need machine-level installation are started
+with UAC. DGSM itself is not restarted as Administrator: its local signing
+certificate, logs, signing report and Desktop shortcut therefore belong to
+the user who launched the builder, not the elevated installer account.
 
-Additional v3.3.3 Windows bootstrap hardening:
-- Uses `py list -1 --format=exe 3.12` to discover the exact managed runtime path.
-- Includes `%LocalAppData%\Python\bin` during PATH refresh.
-- Tries Python Manager's explicit `exec -V:3.12` launch form as a fallback.
-- Tests assert the manager-listing and PATH discovery paths are present.
+SIGNING TRUST
+-------------
+The default self-signed certificate is for local development. It is installed
+in CurrentUser\My and trusted in CurrentUser\Root and CurrentUser\TrustedPublisher.
+It does not establish a public publisher identity, SmartScreen reputation or
+trust on another computer. Public releases require a CA-issued code-signing
+certificate. Set DGSM_PFX_PATH or pass -PfxPath to use it; the password is
+prompted securely unless DGSM_PFX_PASSWORD is provided by automation.
 
-Final v3.3.3 verification in the Linux build environment:
-- Offline regression tests: 30/30 passed.
-- Python module compilation and GitHub Actions YAML parsing: passed.
-- Linux zipapp --version/--help smoke tests: passed.
-- Linux C ABI loaded via ctypes; version and last-error exports passed.
-- Linux detached RSA/SHA-256 signatures verified.
-- Windows PowerShell/MSVC build was not executable in this Linux environment;
-  use BUILD_AND_SIGN_WINDOWS.bat on Windows for actual PE compilation/signing.
+OUTPUTS
+-------
+  dist\windows\exe\DiscordGlobalStatusMonitor.exe
+  dist\windows\dll\discord_global_status.dll
+  dist\windows\signing\signing-report.txt
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip.sha256
+
+The CFFI DLL is Python-backed and requires the same CPython minor runtime used
+to build it, plus the companion dgsm_version.py, monitor source and backends.
+The standalone EXE bundles its CPython runtime and Python dependencies.
+
+PowerShell captures native stdout/stderr/exit codes using .NET ProcessStartInfo.
+Timestamped logs are retained in .build\windows\logs.

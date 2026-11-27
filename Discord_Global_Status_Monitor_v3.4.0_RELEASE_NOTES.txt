@@ -1,0 +1,60 @@
+DGSM 3.4.0 RELEASE NOTES
+========================
+
+WINDOWS BUILD/SIGN PIPELINE
+---------------------------
+* Reworked build/sign pipeline to match the Destiny 2 Damage Tracker process:
+  isolated venv, automated runtime/toolchain detection, one-file EXE build,
+  icon/version resources, Authenticode signing, signature verification,
+  release package, Desktop shortcut and temporary cleanup.
+* Added PFX-based production certificate support with protected password prompt
+  or CI secret environment variable.
+* Added reusable RSA-3072/SHA-256 local development certificate in CurrentUser
+  store, public .cer export, and current-user Root/TrustedPublisher trust.
+* SignTool can be found in the SDK or downloaded from Microsoft's Windows SDK
+  BuildTools NuGet package to a temporary directory. The downloaded SignTool
+  is independently Authenticode-validated; temporary files are removed.
+* Added DigiCert/Sectigo RFC 3161 timestamp fallback and explicit un-timestamped
+  signing fallback with signing report.
+* UAC elevation is limited to Microsoft installers; DGSM remains in the
+  original user session, avoiding wrong-user certificate/shortcut placement.
+* Added DLL RC resource compilation and CFFI `--resource-file` support, fixing
+  the build script/builder argument mismatch.
+* EXE and DLL are tested before and after signing; EXE/DLL metadata is generated
+  from the canonical `dgsm_version.py` version and checked from Windows file
+  resources after compilation.
+* Release packaging removes stale previous ZIP/signing outputs before a new
+  build, records exact build dependency versions, validates required archive
+  entries, and emits SHA-256 manifests.
+* Windows and Linux run launchers prefer the compiled EXE/zipapp when present,
+  then fall back to source mode without double-running the monitor.
+* Linux compiler bootstrap handles both root and sudo invocation and checks for
+  headers matching the selected CPython minor version before CFFI compilation.
+* DLL smoke testing validates all four C ABI exports and verifies the version
+  string length against the returned byte count.
+
+CODE QUALITY / CROSS-PLATFORM
+-----------------------------
+* Centralized application version in dgsm_version.py and shared it with the
+  main monitor and RIPE Atlas User-Agent.
+* Updated Linux zipapp and shared-library build to package the version module,
+  smoke-test C ABI exports and write a Python ABI manifest.
+* Added additional build/sign regression tests and expanded GitHub CI artifact
+  completeness.
+* Updated build, signing, troubleshooting and GitHub documentation.
+
+VERIFICATION
+------------
+* Offline unit tests pass.
+* Python compilation passes.
+* Linux CFFI artifact compilation and C ABI smoke test pass on the current
+  x86-64 CPython environment.
+* Shell syntax checks pass.
+* Native Windows build and Authenticode signing require execution on Windows;
+  they were not run in this Linux environment.
+
+SIGNING NOTE
+------------
+Local self-signed Authenticode signatures provide local developer verification
+only. They are not a publicly trusted publisher certificate. Use a CA-issued
+code-signing PFX for public release distribution.

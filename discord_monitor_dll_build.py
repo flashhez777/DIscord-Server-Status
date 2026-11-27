@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
-"""Build a small C ABI DLL/SO wrapper around the Python monitor using CFFI.
+"""Build the DGSM C ABI DLL/SO wrapper using CFFI embedding.
 
-The library exports:
-  int dgsm_get_version(char *buffer, unsigned int buffer_size);
-  int dgsm_get_last_error(char *buffer, unsigned int buffer_size);
-  int dgsm_run_once(void);
-  int dgsm_run_monitor(void);
-
-The CFFI library does not bundle CPython itself. The monitor source must sit
-beside the DLL/SO (or DGSM_HOME must point to it), and a compatible CPython
-runtime must be installed/available to the host process.
+The library exports a small stable C ABI. On Windows, --resource-file accepts
+an RC-compiled .res file so product icon/version metadata is embedded in the
+DLL before Authenticode signing. The CFFI library does not bundle CPython:
+a compatible runtime and the companion monitor source are required.
 """
 
 from __future__ import annotations
@@ -19,12 +14,25 @@ import os
 from pathlib import Path
 
 from cffi import FFI
+from dgsm_version import __version__
 
-VERSION = "3.3.3"
 MODULE_NAME = "_dgsm_embed"
 
 
 def make_builder(resource_file: Path | None = None) -> FFI:
+    """Create the CFFI embedding builder and optionally link a Windows .res."""
+    extra_link_args: list[str] = []
+    if resource_file is not None:
+        resource_file = resource_file.expanduser().resolve()
+        if not resource_file.is_file():
+            raise FileNotFoundError(f"Windows resource file does not exist: {resource_file}")
+        if os.name != "nt":
+            raise ValueError("A Windows .res resource can only be linked on Windows.")
+        if resource_file.suffix.lower() != ".res":
+            raise ValueError(f"Expected a compiled .res file, received: {resource_file}")
+        # Distutils' MSVC linker accepts compiled .res files as link inputs.
+        extra_link_args.append(str(resource_file))
+
     ffibuilder = FFI()
     ffibuilder.embedding_api(
         """
@@ -34,23 +42,12 @@ def make_builder(resource_file: Path | None = None) -> FFI:
         int dgsm_run_monitor(void);
         """
     )
-    link_args = []
-    if resource_file is not None:
-        resource_file = resource_file.resolve()
-        if not resource_file.is_file():
-            raise FileNotFoundError(f"Windows resource file not found: {resource_file}")
-        # MSVC link.exe accepts a compiled .res input; this embeds the DGSM
-        # application icon in the DLL's PE resources as well as the EXE icon.
-        link_args.append(str(resource_file))
     ffibuilder.set_source(
         MODULE_NAME,
-        r"""
-        #include <string.h>
-        """,
-        extra_link_args=link_args,
+        "#include <string.h>\n",
+        extra_link_args=extra_link_args,
     )
-    ffibuilder.embedding_init_code(
-        r'''
+    embedding_code = r'''
 import os
 import sys
 import traceback
@@ -58,7 +55,7 @@ from pathlib import Path
 from _dgsm_embed import ffi
 
 _DGSM_LAST_ERROR = ""
-_DGSM_VERSION = "3.3.3"
+_DGSM_VERSION = "__DGSM_VERSION__"
 
 
 def _find_app_dir():
@@ -145,8 +142,8 @@ def dgsm_run_once():
 @ffi.def_extern()
 def dgsm_run_monitor():
     return _run_monitor([])
-'''
-    )
+'''.replace("__DGSM_VERSION__", __version__)
+    ffibuilder.embedding_init_code(embedding_code)
     return ffibuilder
 
 
@@ -154,8 +151,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Build the DGSM C ABI DLL/SO wrapper")
     parser.add_argument("--output-dir", type=Path, default=Path("dist/native"))
     parser.add_argument(
-        "--resource-file", type=Path, default=None,
-        help="Optional compiled Windows .res file to embed icon/version resources.",
+        "--resource-file",
+        type=Path,
+        default=None,
+        help="Optional Windows RC-compiled .res file to embed in the DLL.",
     )
     args = parser.parse_args()
 
@@ -163,10 +162,17 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     source_dir = Path(__file__).resolve().parent
     source_file = source_dir / "discord_server_global_status.py"
+    version_file = source_dir / "dgsm_version.py"
     if not source_file.is_file():
         parser.error(f"Python monitor source is missing: {source_file}")
+    if not version_file.is_file():
+        parser.error(f"Canonical version module is missing: {version_file}")
 
-    ffibuilder = make_builder(args.resource_file)
+    try:
+        ffibuilder = make_builder(args.resource_file)
+    except (FileNotFoundError, ValueError) as exc:
+        parser.error(str(exc))
+
     old_cwd = Path.cwd()
     try:
         os.chdir(output_dir)
@@ -174,8 +180,11 @@ def main() -> int:
     finally:
         os.chdir(old_cwd)
 
-    print(f"Native library built: {artifact}")
-    print(f"Place {source_file.name} next to the library or set DGSM_HOME.")
+    print(f"DGSM {__version__} native library built: {artifact}")
+    print(
+        f"Place {source_file.name}, {version_file.name}, and the backends/ directory "
+        "beside the library or set DGSM_HOME."
+    )
     return 0
 
 

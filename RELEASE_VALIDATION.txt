@@ -1,0 +1,58 @@
+DGSM 3.4.1 - RELEASE VALIDATION
+================================
+
+SOURCE VALIDATION
+-----------------
+Offline regression suite: 56 tests passed (including RC2104 resource-template preflight).
+Python bytecode compilation: passed.
+Bash syntax validation (build_linux.sh, sign_linux.sh): passed.
+Linux launcher --version: passed.
+GitHub Actions YAML parsing: performed separately during package validation.
+
+WINDOWS BUILD PIPELINE
+----------------------
+The Windows scripts now provide the D2 Damage Tracker-style sequence:
+Python runtime discovery/installation, isolated venv, dependency installation,
+MSVC/SDK resource compiler provisioning, one-file console EXE build, CFFI DLL
+build with embedded icon/version resources, pre-sign smoke tests, Authenticode
+signing, SignTool/AuthentiCode verification, post-sign smoke tests, Desktop
+shortcut, release manifest, archive validation and temporary cleanup.
+
+Native Windows PE compilation and Authenticode signing were NOT executed in
+this Linux environment. BUILD_AND_SIGN_WINDOWS.bat must be run on Windows 10/11
+x64 to produce the signed Windows EXE and DLL. The source package contains the
+complete build/sign tooling, not precompiled Windows PE binaries.
+
+LINUX ARTIFACTS
+---------------
+Target: x86-64 Linux, CPython 3.13.5, SOABI cpython-313-x86_64-linux-gnu.
+CFFI used for this local artifact: 2.0.0. The reproducible Linux build script
+installs the declared requirement CFFI >= 2.1.1 when network access is available.
+
+DiscordGlobalStatusMonitor.pyz --version: passed.
+DiscordGlobalStatusMonitor.pyz --help: passed.
+C ABI shared-library load/version/export smoke test: passed for the prior Linux build (3.4.0); rebuild with build_linux.sh to produce 3.4.1 artifacts.
+Detached RSA/SHA-256 signatures for .pyz and .so: verified.
+
+The Linux .so is CPython 3.13 ABI-specific. It is not a Windows DLL.
+
+SIGNING TRUST
+-------------
+The Windows default certificate is self-signed and trusted only in the current
+Windows user's trust stores. It does not provide public publisher trust or
+SmartScreen reputation. Public Windows distribution requires a CA-issued
+Authenticode code-signing certificate.
+
+The Linux certificate is a self-signed development certificate. Detached
+signatures prove integrity relative to the included public certificate; they
+do not establish public publisher identity.
+
+WINDOWS RC HOTFIX (3.4.1)
+------------------------
+The DLL VERSIONINFO template now uses self-contained numeric FILEOS and
+FILETYPE constants (0x00040004L and 0x00000002L). This avoids RC2104 when
+rc.exe is launched without an initialized Windows SDK include environment.
+The Windows PyInstaller command explicitly includes only Plyer's Windows
+notification backend instead of recursively collecting Android/iOS/macOS/
+Linux backends; this removes irrelevant platform imports and the optional
+Android jnius collection warning.

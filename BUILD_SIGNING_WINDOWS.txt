@@ -1,0 +1,113 @@
+DGSM 3.4.1 - WINDOWS BUILD AND SIGNING PIPELINE
+================================================
+
+PURPOSE
+-------
+Build DiscordGlobalStatusMonitor.exe and discord_global_status.dll from source,
+embed the DGSM network icon and version metadata, sign both artifacts, verify
+the signatures, run smoke tests, create a Desktop shortcut and package a
+reproducible SHA-256 release. The sequence follows the user's Destiny 2 Damage
+Tracker build/sign workflow and extends its EXE signing path to the DGSM DLL.
+
+ONE-CLICK BUILD
+---------------
+Extract the complete project source package and double-click:
+  BUILD_AND_SIGN_WINDOWS.bat
+
+Equivalent PowerShell:
+  Set-ExecutionPolicy -Scope Process Bypass
+  .\build_windows.ps1
+
+SUPPORTED BUILD HOST
+--------------------
+  * Windows 10/11 x64.
+  * Windows PowerShell 5.1 or PowerShell 7.
+  * Supported x64 CPython 3.11-3.15 (newest installed runtime is preferred).
+  * Internet access to Python.org, Microsoft download endpoints, NuGet,
+    timestamp authorities and PyPI.
+
+AUTOMATIC PROVISIONING
+----------------------
+  * Reuse existing CPython 3.11-3.15 from registry, common installation paths,
+    PATH or the Python install manager. Legacy py.exe is probed read-only and
+    is never passed manager 'install'/'list' commands.
+  * If Python is absent, use the direct official Python Manager MSIX route,
+    then the SHA-256/AuthentiCode-verified Python.org CPython installer as a
+    fallback; WinGet is not a requirement.
+  * Create .build\windows\venv and install requirements-build.txt.
+  * Detect MSVC/Visual Studio and the Windows SDK x64 resource compiler. If
+    absent, download and verify Microsoft's Build Tools bootstrapper and ask
+    UAC to elevate only that Microsoft installer. DGSM itself continues as
+    the original user and does not restart as Administrator.
+
+COMPILE
+-------
+  * Read __version__ from dgsm_version.py (single version source).
+  * Generate PyInstaller and RC metadata from assets\version_info.txt and
+    assets\DGSM.rc templates.
+  * Build the console-mode, one-file EXE with PyInstaller and assets\DGSM.ico.
+  * Compile the DLL's icon and VS_VERSION_INFO resource with SDK rc.exe.
+  * Build the CFFI native library under VsDevCmd x64/MSVC, linking the .res.
+  * Copy the companion source, version module, header and backends beside DLL.
+  * Run EXE --help/--version and DLL C ABI smoke test before signing.
+
+SIGN
+----
+  * Find an installed x64 SignTool and require a valid Microsoft Authenticode
+    signature. If missing, download Microsoft's Microsoft.Windows.SDK.BuildTools
+    NuGet package to a unique temporary folder, extract only the needed files,
+    validate the signature on signtool.exe, and remove temporary files in a
+    finally cleanup block. No full SDK install is performed solely to get
+    SignTool (the Windows SDK resource compiler is still needed for DLL icon
+    metadata and is installed with the MSVC toolchain).
+  * If DGSM_PFX_PATH is configured, use that CA-issued PFX. The password is
+    prompted as a SecureString and cleared, or can be set via the protected
+    DGSM_PFX_PASSWORD environment variable for CI automation.
+  * Otherwise, create or reuse an RSA-3072 SHA-256 Code Signing certificate
+    in Cert:\CurrentUser\My. Export its public .cer and import it into only
+    Cert:\CurrentUser\Root and Cert:\CurrentUser\TrustedPublisher.
+  * Sign both EXE and DLL with SHA-256 Authenticode.
+  * Try the DigiCert and Sectigo RFC 3161 timestamp services in order. If both
+    fail, retry signing without a timestamp and record the failure in the
+    signing report; a missing timestamp does not disable signature validation.
+  * Verify each file with `signtool verify /pa /all /v` and
+    Get-AuthenticodeSignature, then re-run the EXE and DLL smoke tests.
+
+CERTIFICATE TRUST
+-----------------
+The default self-signed certificate is for development on the current Windows
+user profile. It does not create public publisher identity, a trusted CA
+chain, SmartScreen reputation or trust on other computers. Public distribution
+requires a CA-issued code-signing certificate. Do not commit .pfx/.p12 files,
+private keys, signing passwords or the CurrentUser private certificate store.
+
+OPTIONS
+-------
+Keep build venv and intermediates for iterative development:
+  .\build_windows.ps1 -KeepBuildCache
+
+Require installed toolchain and skip signing (CI use only):
+  .\build_windows.ps1 -NoToolchainInstall -SkipSigning
+
+Use a production certificate:
+  $env:DGSM_PFX_PATH = 'C:\Certificates\publisher-codesign.pfx'
+  .\build_windows.ps1
+
+SignTool NuGet version override:
+  .\build_windows.ps1 -SdkBuildToolsVersion 10.0.28000.2705
+
+OUTPUTS
+-------
+  dist\windows\exe\DiscordGlobalStatusMonitor.exe
+  dist\windows\dll\discord_global_status.dll
+  dist\windows\dll\discord_global_status.h
+  dist\windows\signing\signing-report.txt
+  dist\windows\signing\DGSM-Development-CodeSigning.cer (local cert only)
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip.sha256
+  Desktop\Discord Global Status Monitor.lnk
+  .build\windows\logs\build-YYYYMMDD-HHMMSS.log
+
+The DLL is a Python-backed C ABI integration library, not a fully standalone
+runtime. It requires the same CPython minor ABI used to compile it and the
+companion Python source/backend package. The EXE bundles its CPython runtime.

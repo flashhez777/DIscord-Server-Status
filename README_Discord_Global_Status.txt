@@ -1,106 +1,108 @@
-DISCORD GLOBAL STATUS MONITOR (DGSM) 3.3.3
+DISCORD GLOBAL STATUS MONITOR (DGSM) 3.4.1
 ==========================================
 
-PURPOSE
--------
-Worldwide monitoring of Discord's public global service health. This is not
-a guild monitor and does not log in to Discord as a bot or user.
+Cross-platform monitor for Discord GLOBAL public service health only. It does
+not inspect guilds, bots, accounts or private Discord data-center telemetry.
 
-WINDOWS QUICK BUILD
--------------------
-1. Extract the full ZIP directory.
-2. Double-click BUILD_AND_SIGN_WINDOWS.bat.
-3. Approve Windows permission prompts when installing MSVC/Windows SDK.
-4. The builder installs/checks Python 3.12, build dependencies, MSVC x64,
-   Windows SDK resource compiler and SignTool.
-5. It builds DiscordGlobalStatusMonitor.exe and discord_global_status.dll,
-   embeds the DGSM network icon, signs both with Authenticode, verifies the
-   signatures, and creates a Windows release ZIP.
-6. Launch RUN_DISCORD_STATUS.bat or DiscordGlobalStatusMonitor.exe.
+GLOBAL STATUS AND TELEMETRY
+---------------------------
+* Official Discord Statuspage global state, components, incidents and
+  scheduled maintenance.
+* Local REST API, Gateway, CDN, DNS, TLS and host network interface metrics.
+* Globalping distributed ICMP, HTTP/HTTPS, DNS and MTR probes.
+* Optional read-only RIPE Atlas results for existing public measurements.
+* RTT median/p95, packet loss, HTTP timing breakdown, quota and historical
+  telemetry. Each sample carries its measurement vantage/source.
+* Verified TLS using OS trust roots, certifi and optional approved CA PEM.
 
-PYTHON RUNTIME DISCOVERY FIX
-----------------------------
-Earlier builds directly invoked `py.exe -3.12`. When the launcher existed but
-Python 3.12 did not, it emitted "No suitable Python runtime found" to stderr.
-Windows PowerShell 5.1 could promote that text to NativeCommandError and stop
-the build before installing Python. Version 3.3.3 uses a captured .NET process
-runner, distinguishes stderr from exit code, discovers registered/known Python
-paths, installs the official Python install manager via WinGet msstore, runs
-`py install 3.12`, obtains the exact path with `py list -1 --format=exe 3.12`,
-refreshes `%LocalAppData%\Python\bin`, checks the runtime, and uses the
-standalone WinGet CPython 3.12 package as a fallback.
+RUN THE MONITOR
+---------------
+Windows:
+  Double-click RUN_DISCORD_STATUS.bat
 
-WINDOWS BUILD OUTPUT
---------------------
-dist\windows\exe\DiscordGlobalStatusMonitor.exe
-dist\windows\dll\discord_global_status.dll
-dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+Kali/Linux:
+  chmod +x RUN_DISCORD_STATUS.sh
+  ./RUN_DISCORD_STATUS.sh
 
-KALI / LINUX
-------------
-Run the Python source directly:
-  python3 discord_server_global_status.py
+The runtime bootstraps optional telemetry/notification packages into a private
+per-user package directory when needed. It does not globally modify Python.
 
-Build Linux zipapp and C ABI shared library:
+WINDOWS AUTOMATIC EXE + DLL BUILD AND SIGNING
+---------------------------------------------
+Extract the complete source package. Double-click:
+  BUILD_AND_SIGN_WINDOWS.bat
+
+The builder mirrors the Destiny 2 Damage Tracker build/sign workflow and
+extends it to both DGSM.exe and the native C ABI DLL:
+
+  1. Find/reuse 64-bit CPython 3.11-3.15; use the official Python Manager or
+     hash-verified Python.org runtime only when none is already installed.
+     WinGet is not required and legacy py.exe is never used for install/list.
+  2. Create an isolated .build\windows\venv and install requirements-build.txt.
+  3. Derive EXE/DLL version resources from dgsm_version.py.
+  4. Build the one-file console EXE with PyInstaller, DGSM.ico and version info.
+  5. Use Windows SDK rc.exe to compile the DLL icon/version resource, then
+     link the resource into the CFFI DLL using MSVC x64.
+  6. Smoke-test the EXE and DLL before signing.
+  7. Use installed Microsoft SignTool; if missing, download Microsoft's SDK
+     BuildTools NuGet package to a temporary directory, validate its embedded
+     Authenticode-signed SignTool, and delete temporary files after signing.
+  8. Reuse/create a CurrentUser code-signing cert or use a PFX. Sign both files
+     with SHA-256 Authenticode, try DigiCert/Sectigo timestamping, fall back
+     to signing without a timestamp if both timestamp authorities are down.
+  9. Verify signatures and run the post-sign EXE/DLL smoke tests.
+ 10. Create a Desktop shortcut, package binaries and a SHA-256 manifest, then
+     clean the venv and build intermediates by default.
+
+Only Microsoft toolchain installers that need elevation receive UAC. The build
+and signing continue as the launching user, so the local certificate, log and
+Desktop shortcut are created for the correct user profile.
+
+Signing defaults to a self-signed development certificate in CurrentUser\My,
+with the public certificate trusted in CurrentUser\Root and CurrentUser\TrustedPublisher.
+This does not create public publisher trust. For a CA-issued production PFX:
+
+PowerShell:
+  $env:DGSM_PFX_PATH = 'C:\Certificates\publisher-codesign.pfx'
+  .\build_windows.ps1
+
+The signer prompts for the PFX password securely. For CI, DGSM_PFX_PASSWORD may
+be supplied as a protected secret environment variable.
+
+Useful build switches:
+  .\build_windows.ps1 -KeepBuildCache
+  .\build_windows.ps1 -NoToolchainInstall -SkipSigning
+
+WINDOWS OUTPUTS
+---------------
+  dist\windows\exe\DiscordGlobalStatusMonitor.exe
+  dist\windows\dll\discord_global_status.dll
+  dist\windows\signing\signing-report.txt
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+  dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip.sha256
+
+The EXE bundles CPython and its Python dependencies. The CFFI DLL is a
+Python-backed C ABI library and requires the matching CPython minor runtime
+and companion source/backend directory. It is not a standalone executable.
+
+LINUX BUILD
+-----------
   chmod +x build_linux.sh
   ./build_linux.sh
 
-Run portable zipapp:
-  python3 dist/linux/DiscordGlobalStatusMonitor.pyz
+Outputs include a Python zipapp, CPython-ABI-specific C shared library, ABI
+manifest, detached RSA/SHA-256 signatures and SHA-256 sums. Detached local
+signatures prove integrity using the supplied development certificate; they
+do not establish public publisher identity.
 
-BACKENDS
---------
-1. Discord Statuspage: official worldwide incidents/components/maintenance.
-2. Globalping: third-party worldwide ICMP/HTTP/DNS/CDN/MTR probes.
-3. RIPE Atlas: optional read-only latest-result backend for existing public
-   measurement IDs supplied by the operator. Uses a 7-day lookback and does
-   not download full measurement history.
-4. Local connectivity: Discord REST, Gateway WebSocket, CDN, DNS and TLS.
-5. Host telemetry: local interface throughput, packet rates, errors and drops.
-
-RIPE ATLAS OPTIONAL BACKEND
----------------------------
-Set RIPE_ATLAS_MEASUREMENT_IDS to comma-separated existing public measurement
-IDs, or pass --ripe-atlas-ids 12345678,12345679. Results are read-only; DGSM
-does not create/schedule measurements or spend credits. The selected IDs need
-to target Discord endpoints for the results to be meaningful. Optional
-RIPE_ATLAS_API_KEY may be set for authorized reads of private measurements.
-
-GLOBALPING
-----------
-Optional bearer token environment variable: GLOBALPING_API_TOKEN
-DGSM queries the provider's /v1/limits endpoint and respects rate limits.
-
-USEFUL COMMANDS
----------------
-  python3 discord_server_global_status.py --once
-  python3 discord_server_global_status.py --json
+DIAGNOSTICS
+-----------
   python3 discord_server_global_status.py --doctor
+  python3 discord_server_global_status.py --once
   python3 discord_server_global_status.py --history
   python3 discord_server_global_status.py --telemetry-history
-  python3 discord_server_global_status.py --no-globalping
-  python3 discord_server_global_status.py --ripe-atlas-ids 12345678
-
-TESTS
------
   python3 -m unittest -v test_discord_server_global_status.py
 
-SECURITY AND MEASUREMENT LIMITATIONS
-------------------------------------
-* TLS verification remains enabled; do not disable certificate validation.
-* Third-party probes do not expose Discord's private data-center telemetry.
-* ICMP may be filtered; correlate it with HTTP/DNS/TLS/Gateway and the
-  official Discord Statuspage before interpreting it as an outage.
-* Self-signed development certificates provide local signature/integrity
-  verification, not a publicly trusted publisher identity or SmartScreen
-  reputation. Public distribution requires a CA-issued code-signing cert.
-* The Windows DLL is a Python-backed C ABI wrapper. It requires compatible
-  CPython 3.12 and companion source/backend files at runtime.
-
-REPOSITORY DOCUMENTATION
-------------------------
-README.md                       GitHub rendered documentation
-GITHUB_README.txt               Plain-text project overview
-BACKENDS.txt                    Backend design and configuration
-BUILD_TROUBLESHOOTING.txt       Python/WinGet/MSVC build troubleshooting
-.env.example                    Safe environment-variable template
+TLS verification remains enabled. Do not disable certificate checks to work
+around a proxy or trust-store problem. Use --ca-bundle only with an approved
+CA certificate.

@@ -1,6 +1,7 @@
 # Windows and Linux packaging/build dependencies
-pyinstaller>=6.0
-cffi>=1.16
+# PyInstaller 6.21+ supports CPython 3.15; CFFI 2.1+ supports CPython 3.11-3.15.
+pyinstaller>=6.21
+cffi>=2.1.1
 setuptools>=75
 wheel>=0.44
 certifi>=2026.11.20

@@ -1,95 +1,131 @@
-DGSM 3.3.3 - WINDOWS BUILD TROUBLESHOOTING
+DGSM 3.4.1 - WINDOWS BUILD TROUBLESHOOTING
 ==========================================
 
-FIX FOR: py.exe : No suitable Python runtime found
---------------------------------------------------
-CAUSE
-  The Python launcher (py.exe) was installed, but CPython 3.12 itself was
-  missing. The old build invoked `py -3.12` directly. Windows PowerShell 5.1
-  interpreted stderr as a terminating NativeCommandError because the script
-  runs with $ErrorActionPreference = 'Stop'. The script stopped before it
-  could install Python.
+WHAT CHANGED
+------------
+The build no longer requires WinGet or Microsoft App Installer when a
+supported Python runtime is already present.
 
-FIX IN 3.3.3
-  * Python, WinGet, Visual Studio discovery, resource compilation and SignTool
-    operations use System.Diagnostics.ProcessStartInfo where native processes
-    are called.
-  * stdout, stderr, timeouts, and return codes are captured separately.
-  * Missing-runtime output is no longer treated as a PowerShell exception.
-  * The script searches installed Python registry keys and common folders.
-  * It checks py.exe and pymanager.exe without letting native stderr abort.
-  * It asks the Python install manager for the exact executable using
-    `py list -1 --format=exe 3.12`, rather than assuming a fixed install path.
-  * PATH refresh includes `%LocalAppData%\Python\bin`, where the manager
-    normally exposes its global `py`, `python`, and `pip` command aliases.
-  * If absent, it installs the official Python install manager through
-    WinGet's msstore source (package ID 9NQ7512CXL7T).
-  * It provisions Python 3.12 with `py install 3.12` / `pymanager install 3.12`.
-  * It refreshes PATH and checks again.
-  * It falls back to WinGet package Python.Python.3.12.
+The previous failure had two causes:
+  1. `py.exe` was the legacy Python Launcher, not the new Python install
+     manager. The legacy launcher interpreted `install` as a Python script.
+  2. The builder insisted on CPython 3.12 even though Python 3.15 was already
+     installed, then treated WinGet as mandatory.
+
+DGSM 3.4.1 behavior:
+  * Removes stale previous release ZIP/checksum/signing report before a new
+    build starts, preventing an old successful release from being confused
+    with new partially built binaries.
+  * Verifies EXE and DLL ProductVersion/FileDescription resources after
+    compilation, verifies all C ABI exports without invoking the monitor,
+    and checks required contents of the final release ZIP.
+  * Reuses the newest installed 64-bit CPython from 3.11 through 3.15.
+  * Checks registry entries, standard install paths, PATH and registered
+    Python Manager runtimes. The user's Python315 layout is detected.
+  * Validates implementation, exact supported version range and 64-bit ABI
+    by starting the interpreter and checking a sentinel output.
+  * Uses Python Manager only if no supported CPython is installed. It calls
+    `pymanager.exe`, never `py.exe`, for `list` and `install` subcommands.
+  * Downloads the official Python Manager 26.4 MSIX from python.org and
+    verifies the published SHA-256 before Add-AppxPackage installation.
+  * If AppX/MSIX deployment is blocked, tries the SHA-256 and Authenticode-verified
+    Python.org CPython 3.13.17 x64 per-user installer as a last resort.
+  * Installs Visual Studio Build Tools and the Windows SDK resource compiler
+    directly from Microsoft-signed installers. WinGet is optional, not required.
+  * Elevates only the Microsoft installer with UAC. The actual build, local
+    signing certificate, signing report and Desktop shortcut stay in the
+    original user profile.
+  * Captures stdout, stderr, exit codes and timeouts using .NET
+    ProcessStartInfo, avoiding PowerShell native-command error promotion.
+  * Writes a timestamped full transcript to .build\windows\logs\.
+
+RUNTIME COMPATIBILITY
+---------------------
+The Windows build accepts 64-bit CPython 3.11, 3.12, 3.13, 3.14 or 3.15.
+PyInstaller 6.21+ supports CPython 3.15 and CFFI 2.1+ is tested with 3.11-3.15.
+The Python runtime version used is recorded in the release build manifest.
+The CFFI DLL is Python-backed and requires the same Python minor runtime used
+for its compilation, plus the bundled companion Python source/backend files.
 
 RUN
-  1. Extract the complete release folder (do not run from inside the ZIP).
-  2. Open Windows PowerShell or Command Prompt.
-  3. Right-click BUILD_AND_SIGN_WINDOWS.bat and run it.
-  4. Approve UAC when Windows asks to install MSVC/Windows SDK.
-  5. Keep internet access enabled while WinGet and pip install build tools.
+---
+  1. Extract the complete release folder (do not run it inside the ZIP).
+  2. Double-click BUILD_AND_SIGN_WINDOWS.bat.
+  3. Approve UAC if Windows requests MSVC/SDK installation.
+  4. Keep internet access enabled for downloads and pip package installation.
+  5. Find the EXE, DLL, signatures and package under dist\windows\.
 
-If the Python install manager completed but the runtime cannot be made
-available to the current process, open a NEW PowerShell window and run:
-  py install 3.12
-  py list -1 --format=exe 3.12
-  py -V:3.12 -c "import sys; print(sys.executable)"
-Then rerun BUILD_AND_SIGN_WINDOWS.bat.
+SUPPORTED SYSTEM
+----------------
+  * Windows 10 (supported builds) or Windows 11, x64.
+  * Windows PowerShell 5.1 or PowerShell 7.
+  * Internet access to python.org, Microsoft download endpoints, and PyPI.
+  * Local administrator approval may be requested for Visual Studio / SDK.
+  * WinGet / App Installer is optional.
 
-WIN GET / APP INSTALLER
------------------------
-If winget is not recognized or returns source errors:
-  * Install/update Microsoft App Installer from Microsoft Store.
-  * Run `winget source update` in a new terminal.
-  * Verify `winget --info` works.
+PYTHON RUNTIME INSTALL FAILURE
+------------------------------
+If an existing CPython 3.11-3.15 x64 runtime is detected, the builder uses it
+and does not invoke Python Manager or WinGet.
 
-MSVC / WINDOWS SDK
-------------------
-The build requires:
-  * Visual Studio Build Tools with MSVC x64 C++ tools.
-  * Windows 10/11 SDK including rc.exe and SignTool.
+If no supported runtime is found:
+  1. The builder downloads and hash-verifies Python Manager 26.4 MSIX.
+  2. It installs the MSIX using Add-AppxPackage.
+  3. It invokes only pymanager.exe to install a supported CPython runtime.
+  4. If AppX is blocked, it tries the signed standalone CPython 3.13.17
+     installer as a final compatibility fallback.
 
-The script installs these via WinGet / Visual Studio Installer where possible.
-If automatic component modification fails, open Visual Studio Installer and
-modify Build Tools to include:
-  * Desktop development with C++ / MSVC x64/x86 build tools.
-  * Windows 11 SDK (or a compatible Windows 10 SDK).
-  * Windows SDK Signing Tools for Desktop Apps.
-  * Windows SDK resource compiler.
+If both routes fail, inspect:
+  .build\windows\logs\build-*.log
+  .build\downloads
+Common causes include:
+  * TLS inspection proxy missing its trusted root certificate.
+  * AppX deployment disabled by Group Policy.
+  * Python.org blocked by firewall/proxy.
+  * AppLocker / WDAC policy blocking signed installers.
+  * insufficient disk space or user profile permissions.
+
+Do not disable TLS certificate verification. Allow the official domains or
+install the organization-approved proxy root into the Windows trust store.
+
+MSVC / WINDOWS SDK INSTALLATION
+-------------------------------
+The builder downloads the signed Visual Studio Build Tools bootstrapper from
+Microsoft and installs the C++ x64 workload, MSVC x64 compiler and Windows SDK.
+It verifies that the SDK resource compiler (rc.exe) and SignTool are present.
+Existing Visual Studio installations are modified in-place when possible.
 
 BUILD OUTPUT
 ------------
 dist\windows\exe\DiscordGlobalStatusMonitor.exe
 dist\windows\dll\discord_global_status.dll
 dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+.build\windows\logs\build-YYYYMMDD-HHMMSS.log
 
 SIGNING
 -------
-A local self-signed certificate is created and imported into the current
-user's Trusted Root and Trusted Publisher stores. This supports local test
-verification; it does not make Windows SmartScreen trust the publisher.
-Public distribution requires a CA-issued code-signing certificate.
-
-DLL RUNTIME
------------
-The CFFI DLL is Python-backed. It is not a fully self-contained native rewrite.
-Keep discord_server_global_status.py and the backends/ directory next to the
-DLL, or set DGSM_HOME to their directory. A compatible CPython 3.12 runtime is
-required by the host process.
+The builder creates a local self-signed development certificate if none was
+provided, signs EXE and DLL using SHA-256 Authenticode, then verifies each
+signature. A self-signed certificate is not a publicly trusted publisher
+identity and does not eliminate SmartScreen warnings. Public release signing
+requires a CA-issued code-signing certificate.
 
 IF IT STILL FAILS
 -----------------
-Keep the complete PowerShell output and attach:
-  * dist\windows\signing\signing-report.txt (if generated)
-  * .build\windows logs / generated PyInstaller output
-  * your Windows version (`winver`)
-  * `winget --info`
-  * `py list` or `py --list` output
+Attach the latest timestamped transcript from .build\windows\logs\ and the
+PowerShell output. Do not send API keys, signing private keys or personal
+access tokens.
 
-Do not send API keys, signing private keys, or personal tokens in issue reports.
+DLL RESOURCE COMPILER RC2104
+---------------------------
+If rc.exe reports an undefined VOS_NT_WINDOWS32 or VFT_DLL keyword, make
+sure assets/DGSM.rc uses the numeric VERSIONINFO constants:
+  FILEOS 0x00040004L
+  FILETYPE 0x00000002L
+The builder checks these values before launching rc.exe. The numeric values
+are the Windows SDK definitions for VOS_NT_WINDOWS32 and VFT_DLL and avoid
+relying on winver.h being discoverable from an uninitialized shell.
+
+The Windows PyInstaller target includes the specific
+plyer.platforms.win.notification backend. It intentionally does not collect
+Android, iOS, macOS or Linux Plyer modules into the Windows executable.

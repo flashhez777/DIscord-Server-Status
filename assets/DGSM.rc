@@ -1,3 +1,33 @@
-// Discord Global Status Monitor application icon resource.
-// Compile from this directory so the icon path resolves reliably.
+// DGSM product icon and version metadata, embedded into the C ABI DLL.
 1 ICON "DGSM.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @DGSM_VERSION_COMMA4@
+ PRODUCTVERSION @DGSM_VERSION_COMMA4@
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ // Numeric values from the Windows VERSIONINFO definitions in winver.h.
+ // Keeping them numeric makes this RC self-contained for rc.exe even when
+ // Visual Studio include paths have not been initialized in the parent shell.
+ FILEOS 0x00040004L
+ FILETYPE 0x00000002L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "DGSM Project\0"
+            VALUE "FileDescription", "Discord Global Status Monitor C ABI\0"
+            VALUE "FileVersion", "@DGSM_VERSION_DOTTED4@\0"
+            VALUE "InternalName", "discord_global_status\0"
+            VALUE "OriginalFilename", "discord_global_status.dll\0"
+            VALUE "ProductName", "Discord Global Status Monitor\0"
+            VALUE "ProductVersion", "@DGSM_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

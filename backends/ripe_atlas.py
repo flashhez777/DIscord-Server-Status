@@ -17,8 +17,10 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from dgsm_version import __version__ as DGSM_VERSION
+
 API_BASE = "https://atlas.ripe.net/api/v2/measurements"
-USER_AGENT = "DiscordGlobalStatusMonitor-RIPEAtlas/3.3.3"
+USER_AGENT = f"DiscordGlobalStatusMonitor-RIPEAtlas/{DGSM_VERSION}"
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for Discord Global Status Monitor 3.3.3."""
+"""Offline unit tests for Discord Global Status Monitor 3.4.1."""
 
 import io
 import json
@@ -240,6 +240,12 @@ class GlobalpingRequestSchemaTests(unittest.TestCase):
         self.assertEqual(payload["measurementOptions"]["port"], 8080)
         self.assertEqual(payload["measurementOptions"]["request"]["path"], "/health")
 
+    def test_zero_http_port_is_rejected_before_network_request(self):
+        with mock.patch.object(monitor, "globalping_request") as request:
+            with self.assertRaisesRegex(monitor.MonitorError, "port must be between 1 and 65535"):
+                monitor.create_globalping_measurement("http", "https://discord.com:0/api", 4, 5, None)
+        request.assert_not_called()
+
     def test_invalid_http_url_is_rejected_before_network_request(self):
         with mock.patch.object(monitor, "globalping_request") as request:
             with self.assertRaisesRegex(monitor.MonitorError, r"expected an http\(s\) URL"):
@@ -348,16 +354,81 @@ class RipeAtlasBackendTests(unittest.TestCase):
 
 
 class WindowsBuildBootstrapTests(unittest.TestCase):
-    def test_builder_uses_safe_process_capture_for_runtime_discovery(self):
+    def test_builder_reuses_installed_python_315_without_win_get(self):
         script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("function Invoke-CapturedProcess", script)
-        self.assertIn("function Ensure-Python312", script)
-        self.assertIn("-Source 'msstore'", script)
-        self.assertIn("py install", script)
-        self.assertIn("'list', '-1', '--format=exe', '3.12'", script)
-        self.assertIn("$pythonManagerBin = Join-Path $env:LOCALAPPDATA 'Python\\bin'", script)
-        self.assertIn("System.Collections.Generic.HashSet[string]", script)
-        self.assertNotIn("& $launcher.Source -3.12", script)
+        self.assertIn("function Ensure-PythonBuildRuntime", script)
+        self.assertIn("function Get-PythonBuildRuntime", script)
+        self.assertIn("function Test-PythonBuildPath", script)
+        self.assertIn("'3.15', '3.14', '3.13', '3.12', '3.11'", script)
+        self.assertIn("(3, 11) <= sys.version_info[:2] < (3, 16)", script)
+        self.assertIn('Programs\\Python\\Python$compact', script)
+        self.assertIn("python-manager-26.4.msix", script)
+        self.assertIn("002CFE4F4B63E322E9C8170CEA4D7D97E3E2D18246887325F969BB75F482F4DC", script)
+        self.assertIn("function Install-Cpython313Standalone", script)
+        self.assertIn("Python Software Foundation", script)
+        self.assertIn("python-3.13.17-amd64.exe", script)
+        self.assertIn("5DA012101BA2E17113A9A1CD901E9CE1441086F2B7ECB5DE06EC94163899A190", script)
+        self.assertNotIn("WinGet is unavailable", script)
+        self.assertNotIn("python-3.12.10-amd64.exe", script)
+        self.assertNotIn("function Invoke-WingetInstall", script)
+        self.assertIn("requirements-build.txt", script)
+        self.assertIn("'-r', $BuildRequirements", script)
+        requirements = Path(__file__).with_name("requirements-build.txt").read_text(encoding="utf-8")
+        self.assertIn("pyinstaller>=6.21", requirements)
+        self.assertIn("cffi>=2.1.1", requirements)
+
+    def test_builder_rejects_end_of_life_python_310_for_native_builds(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("sys.version_info[:2] < (3, 16)", script)
+        self.assertIn("[int]$pyVersionParts[1] -lt 11", script)
+        self.assertNotIn("'3.10'", script)
+
+    def test_windows_docs_have_valid_log_paths_and_current_fallback(self):
+        docs = Path(__file__).with_name("BUILD_TROUBLESHOOTING.txt").read_text(encoding="utf-8")
+        self.assertIn(".build\\windows\\logs\\build-*.log", docs)
+        self.assertNotIn("logsbuild-", docs)
+        self.assertIn("CPython 3.13.17", docs)
+
+    def test_existing_python315_user_install_directory_is_discovered(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn('Join-Path $env:LOCALAPPDATA "Programs\\Python\\Python$compact"', script)
+        self.assertIn("$compact = $tag.Replace('.', '')", script)
+        self.assertIn("$expectedMinor = ($pyVersion.Split('.')[0..1] -join '.')", script)
+        self.assertIn("$venvCheckCode", script)
+
+    def test_legacy_py_is_never_used_for_manager_install_or_list_subcommands(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("Get-Command 'py.exe'", script)
+        self.assertIn("Get-Command 'pymanager.exe'", script)
+        self.assertIn("@('list', '-1', '--format=exe', $tag)", script)
+        self.assertIn("-FilePath $manager -Arguments @('install', $tag)", script)
+        self.assertNotIn("-FilePath $legacy.Source -Arguments @('install'", script)
+        self.assertNotIn("-FilePath $legacy.Source -Arguments @('list'", script)
+        self.assertNotIn("Ensure-Python312", script)
+
+    def test_launcher_has_separate_success_and_log_lines(self):
+        launcher = Path(__file__).with_name("BUILD_AND_SIGN_WINDOWS.bat").read_text(encoding="ascii")
+        self.assertIn("echo EXE, DLL, Authenticode signatures and package are under dist\\windows\\\n", launcher)
+        self.assertIn("echo Build transcript: .build\\windows\\logs\\\n", launcher)
+        self.assertNotIn("windowsecho", launcher)
+
+    def test_toolchain_installs_without_winget_and_elevates_only_installers(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("https://aka.ms/vs/17/release/vs_BuildTools.exe", script)
+        self.assertIn("ExpectedPublisher 'Microsoft Corporation'", script)
+        self.assertIn("function Invoke-ElevatedInstaller", script)
+        self.assertIn("-Verb RunAs", script)
+        self.assertNotIn("function Restart-Elevated", script)
+        self.assertNotIn("$ElevatedRetry", script)
+        self.assertIn("Build Tools directly (WinGet is not required)", script)
+        self.assertIn("Microsoft.Windows.SDK.BuildTools", Path(__file__).with_name("sign_windows.ps1").read_text(encoding="utf-8"))
+
+    def test_builder_creates_a_persistent_diagnostic_transcript(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("Start-Transcript -Path $BuildLog", script)
+        self.assertIn("Full build log: $BuildLog", script)
+        self.assertIn(".build\\windows\\logs", script)
 
     def test_builder_stages_additional_backend_modules(self):
         script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
@@ -371,11 +442,158 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
         self.assertIn("function Invoke-SignTool", signer)
         self.assertNotIn("& $signTool.FullName sign", signer)
 
+    def test_signing_matches_damage_tracker_certificate_and_sign_tool_flow(self):
+        signer = Path(__file__).with_name("sign_windows.ps1").read_text(encoding="utf-8")
+        for required in (
+            "Microsoft.Windows.SDK.BuildTools",
+            "Get-AuthenticodeSignature",
+            "CurrentUser\\My",
+            "Cert:\\CurrentUser\\Root",
+            "Cert:\\CurrentUser\\TrustedPublisher",
+            "New-SelfSignedCertificate",
+            "-Type CodeSigningCert",
+            "-KeyAlgorithm RSA",
+            "-KeyLength 3072",
+            "-HashAlgorithm SHA256",
+            "timestamp.digicert.com",
+            "timestamp.sectigo.com",
+            "'verify', '/pa', '/all', '/v'",
+            "finally",
+            "ZeroFreeBSTR",
+        ):
+            self.assertIn(required, signer)
+
+    def test_exe_and_dll_are_smoke_tested_then_signed(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("--version-file", script)
+        self.assertIn("--resource-file", script)
+        self.assertIn("dll_smoke_test.py", script)
+        self.assertIn("$Artifacts = @($ExePath, $DllPath)", script)
+        self.assertIn("Discord Global Status Monitor.lnk", script)
+        self.assertIn("-KeepBuildCache", script)
+
+    def test_native_dll_builder_accepts_and_links_resource_file(self):
+        builder = Path(__file__).with_name("discord_monitor_dll_build.py").read_text(encoding="utf-8")
+        self.assertIn('"--resource-file"', builder)
+        self.assertIn("extra_link_args=extra_link_args", builder)
+        self.assertIn("from dgsm_version import __version__", builder)
+
+    def test_dll_rc_template_uses_self_contained_numeric_windows_constants(self):
+        rc = (Path(__file__).parent / "assets" / "DGSM.rc").read_text(encoding="utf-8")
+        self.assertRegex(rc, r"(?m)^\s*FILEOS\s+0x00040004L\s*$")
+        self.assertRegex(rc, r"(?m)^\s*FILETYPE\s+0x00000002L\s*$")
+        self.assertNotRegex(rc, r"\bVOS_NT_WINDOWS32\b|\bVFT_DLL\b")
+        builder = (Path(__file__).parent / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("DLL RC template must use FILEOS 0x00040004L", builder)
+        self.assertIn("DLL RC template must use FILETYPE 0x00000002L", builder)
+
+    def test_windows_pyinstaller_only_collects_windows_plyer_backend(self):
+        script = (Path(__file__).parent / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("plyer.platforms.win.notification", script)
+        self.assertNotIn("'--collect-all', 'plyer'", script)
+
+    def test_build_metadata_templates_use_single_canonical_version(self):
+        root = Path(__file__).parent
+        version = (root / "dgsm_version.py").read_text(encoding="utf-8")
+        project = (root / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('__version__ = "3.4.1"', version)
+        self.assertIn('__version_info__ = (3, 4, 1)', version)
+        self.assertIn('version = "3.4.1"', project)
+        self.assertIn("@DGSM_VERSION_TUPLE@", (root / "assets" / "version_info.txt").read_text(encoding="utf-8"))
+        self.assertIn("@DGSM_VERSION_COMMA4@", (root / "assets" / "DGSM.rc").read_text(encoding="utf-8"))
+
+    def test_linux_build_includes_canonical_version_and_abi_manifest(self):
+        script = Path(__file__).with_name("build_linux.sh").read_text(encoding="utf-8")
+        self.assertIn('cp "$VERSION_MODULE" "$STAGE/"', script)
+        self.assertIn('cp "$VERSION_MODULE" "$DIST/"', script)
+        self.assertIn('"$DLL_SMOKE_TEST"', script)
+        self.assertIn('BUILD_ABI.txt', script)
+
+    def test_signing_reports_timestamp_failures_and_uses_current_user_scope(self):
+        signer = Path(__file__).with_name("sign_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("Timestamp attempt failed:", signer)
+        self.assertIn("Cert:\\CurrentUser\\Root", signer)
+        self.assertIn("Cert:\\CurrentUser\\TrustedPublisher", signer)
+        self.assertIn("Temporary Microsoft SDK BuildTools NuGet package", signer)
+        self.assertIn("'verify', '/pa', '/all', '/v'", signer)
+
+    def test_windows_build_elevates_only_microsoft_installers(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Invoke-ElevatedInstaller", script)
+        self.assertIn("Get-AuthenticodeSignature -FilePath $FilePath", script)
+        self.assertIn("-Verb RunAs", script)
+        self.assertNotIn("Start-Process -FilePath 'powershell.exe' -Verb RunAs", script)
+        self.assertIn("the invoking user's profile", script)
+
+    def test_dll_version_and_exe_version_derive_from_canonical_module(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("$versionMatch = [regex]::Match($versionSourceText", script)
+        self.assertIn("$AppVersion = $versionMatch.Groups['version'].Value", script)
+        self.assertIn("--expected-version', $AppVersion", script)
+        self.assertIn('$VersionDotted4 = "$AppVersion.0"', script)
+
+
+    def test_run_launchers_prefer_compiled_artifacts_and_fallback_to_source(self):
+        root = Path(__file__).parent
+        windows = (root / "RUN_DISCORD_STATUS.bat").read_text(encoding="ascii")
+        linux = (root / "RUN_DISCORD_STATUS.sh").read_text(encoding="utf-8")
+        self.assertIn("DiscordGlobalStatusMonitor.exe", windows)
+        self.assertIn("dist\\windows\\exe", windows)
+        self.assertIn("discord_server_global_status.py", windows)
+        self.assertIn("dist/linux/DiscordGlobalStatusMonitor.pyz", linux)
+        self.assertIn("discord_server_global_status.py", linux)
+
+    def test_dll_smoke_test_checks_all_exports_and_abi_version(self):
+        smoke = (Path(__file__).parent / "dll_smoke_test.py").read_text(encoding="utf-8")
+        self.assertIn("dgsm_get_version", smoke)
+        self.assertIn("dgsm_get_last_error", smoke)
+        self.assertIn("dgsm_run_once", smoke)
+        self.assertIn("dgsm_run_monitor", smoke)
+        self.assertIn("export.restype = ctypes.c_int", smoke)
+        self.assertIn("version length mismatch", smoke)
+
+    def test_windows_builder_checks_embedded_resource_versions_and_zip_contents(self):
+        script = (Path(__file__).parent / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("$exeVersionResource = (Get-Item -LiteralPath $ExePath).VersionInfo", script)
+        self.assertIn("$dllVersionResource = (Get-Item -LiteralPath $DllPath).VersionInfo", script)
+        self.assertIn("[System.IO.Compression.ZipFile]::OpenRead($PackagePath)", script)
+        self.assertIn("Build dependency versions:", script)
+        self.assertIn("requirements-build.txt", script)
+
+    def test_windows_resource_script_uses_rc_safe_absolute_icon_path(self):
+        script = (Path(__file__).parent / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("$absoluteIconPath = $IconPath.Replace([char]92, [char]47)", script)
+        self.assertIn("$absoluteIconResource = '1 ICON \"' + $absoluteIconPath + '\"'", script)
+
+    def test_linux_build_checks_matching_python_headers_and_supports_root(self):
+        script = (Path(__file__).parent / "build_linux.sh").read_text(encoding="utf-8")
+        self.assertIn("PY_MINOR=", script)
+        self.assertIn("apt_run()", script)
+        self.assertIn('[[ -f "$PY_INCLUDE/Python.h" ]]', script)
+        self.assertIn("Python 3.10 or newer", script)
+
+    def test_build_uses_utf8_without_bom_for_generated_windows_resources(self):
+        script = (Path(__file__).parent / "build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("[System.Text.UTF8Encoding]::new($false)", script)
+        self.assertIn("$absoluteIconPath = $IconPath.Replace([char]92, [char]47)", script)
+
+    def test_windows_ci_parses_powershell_scripts(self):
+        workflow = (Path(__file__).parent / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("PowerShell build and signing scripts", workflow)
+        self.assertIn("System.Management.Automation.Language.Parser]::ParseFile", workflow)
+        self.assertIn("'build_windows.ps1', 'sign_windows.ps1'", workflow)
+
+    def test_linux_build_removes_cffi_intermediate_outputs(self):
+        script = (Path(__file__).parent / "build_linux.sh").read_text(encoding="utf-8")
+        self.assertIn('rm -f "$DIST/_dgsm_embed.c" "$DIST/_dgsm_embed.o"', script)
+        self.assertIn('find "$DIST" -type d -name __pycache__', script)
+
     def test_github_actions_ci_workflow_exists(self):
         workflow = Path(__file__).parent / ".github" / "workflows" / "ci.yml"
         self.assertTrue(workflow.is_file())
         text = workflow.read_text(encoding="utf-8")
         self.assertIn("windows-latest", text)
+        self.assertIn("3.15", text)
         self.assertIn("ubuntu-latest", text)
         self.assertIn("test_discord_server_global_status.py", text)
 

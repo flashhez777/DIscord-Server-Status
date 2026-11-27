@@ -1,0 +1,45 @@
+DGSM 3.3.6 RELEASE NOTES
+========================
+
+WINDOWS BOOTSTRAP FIX
+---------------------
+* No longer assumes WinGet is installed or available.
+* Reuses installed CPython 3.11-3.15 x64 (newest first), including the
+  exact `%LocalAppData%\Programs\Python\Python315\python.exe` path
+  shown in the reported build log.
+* Only provisions a runtime if no supported CPython is found.
+* Uses the dedicated pymanager.exe command for Python Manager operations.
+* Never invokes `py.exe install` or `py.exe list`, avoiding legacy launcher
+  behavior that tries to open `install` as a .py file.
+* Verifies candidate runtimes by launching them and checking CPython,
+  supported version range and 64-bit architecture.
+* Keeps direct official Python Manager MSIX installation and signed
+  CPython 3.13.17 fallback for machines without a supported runtime; its SHA-256 and Authenticode publisher are verified.
+
+BUILDER RELIABILITY
+-------------------
+* Rebuilt the one-click batch launcher with corrected output and log paths.
+* Maintains native process stdout/stderr/exit-code separation.
+* Keeps verified direct downloads, retries, UAC, compiler and SDK checks.
+* Isolated venv now matches the interpreter's detected major/minor version.
+* Build metadata and DLL runtime notes include the selected Python version.
+
+DEPENDENCY SUPPORT
+------------------
+* PyInstaller 6.21+ for CPython 3.15 support.
+* CFFI 2.1+ for CPython 3.11-3.15.
+* Uses the newest supported Python runtime already installed.
+
+RUNTIME SUPPORT NOTE
+--------------------
+* Python 3.10 is no longer accepted as a build runtime because it reached
+  end of life on 2026-10-01. The DGSM source CLI still supports its declared
+  Python minimum independently; the Windows native build uses CPython 3.11+.
+
+VALIDATION
+----------
+* Offline regression suite: 38 tests pass after this release update.
+* Python compilation: passed before this release update.
+* Static builder assertions are extended for supported runtime discovery.
+* Native Windows build still requires execution on Windows; it was not run
+  from the Linux packaging environment.

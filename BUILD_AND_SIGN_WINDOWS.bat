@@ -1,12 +1,16 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-title DGSM 3.3.3 - Automatic Windows EXE and DLL Builder
+title DGSM 3.4.1 - Automatic Windows EXE and DLL Builder
 
 echo ============================================================
-echo Discord Global Status Monitor 3.3.3
+echo Discord Global Status Monitor 3.4.1
 echo Automatic Python, MSVC, SDK, EXE, DLL and signing pipeline
 echo ============================================================
+echo.
+echo Reuses installed 64-bit CPython 3.11 through 3.15 when available.
+echo Installs a supported runtime only when none is already installed.
+echo WinGet is NOT required.
 echo.
 where powershell.exe >nul 2>nul
 if errorlevel 1 (
@@ -21,6 +25,7 @@ if not "%BUILD_EXIT%"=="0" goto failed
 echo.
 echo BUILD SUCCEEDED.
 echo EXE, DLL, Authenticode signatures and package are under dist\windows\
+echo Build transcript: .build\windows\logs\
 echo.
 pause
 endlocal & exit /b 0
@@ -28,8 +33,7 @@ endlocal & exit /b 0
 :failed
 echo.
 echo BUILD FAILED with exit code %BUILD_EXIT%.
-echo Python runtime discovery no longer treats "No suitable Python runtime found" as a PowerShell exception.
-echo See BUILD_TROUBLESHOOTING.txt and the full output above.
+echo WinGet is optional. See BUILD_TROUBLESHOOTING.txt and .build\windows\logs\
 echo.
 pause
 endlocal & exit /b %BUILD_EXIT%

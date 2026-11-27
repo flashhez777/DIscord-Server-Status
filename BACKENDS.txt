@@ -1,4 +1,4 @@
-DGSM 3.3.3 - BACKEND ARCHITECTURE
+DGSM 3.4.1 - BACKEND ARCHITECTURE
 ================================
 
 SCOPE

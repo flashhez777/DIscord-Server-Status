@@ -1,0 +1,26 @@
+DGSM 3.4.1 RELEASE NOTES
+========================
+
+WINDOWS DLL RESOURCE COMPILER FIX
+---------------------------------
+- Fixed Windows RC2104: undefined keyword VOS_NT_WINDOWS32.
+- DLL VERSIONINFO now uses self-contained numeric Windows values:
+  FILEOS 0x00040004L (VOS_NT_WINDOWS32)
+  FILETYPE 0x00000002L (VFT_DLL)
+- The resource file no longer depends on winver.h being discoverable by rc.exe.
+
+WINDOWS EXECUTABLE PACKAGING
+----------------------------
+- PyInstaller explicitly includes plyer.platforms.win.notification.
+- Removed recursive collection of every Plyer platform backend from the
+  Windows EXE, avoiding irrelevant Android/iOS/macOS/Linux imports and the
+  non-fatal Android jnius warning seen in the supplied build log.
+- All other build, smoke-test, Authenticode signing, timestamping, packaging,
+  shortcut creation and cleanup steps are retained.
+
+VALIDATION
+----------
+- Offline regression suite: 56 tests.
+- Python compilation and source ZIP integrity validated in this environment.
+- Native Windows rc.exe / MSVC build must be rerun on Windows to verify the
+  final PE EXE and DLL. This Linux environment cannot execute rc.exe.
