@@ -1,0 +1,95 @@
+DGSM 3.3.3 - WINDOWS BUILD TROUBLESHOOTING
+==========================================
+
+FIX FOR: py.exe : No suitable Python runtime found
+--------------------------------------------------
+CAUSE
+  The Python launcher (py.exe) was installed, but CPython 3.12 itself was
+  missing. The old build invoked `py -3.12` directly. Windows PowerShell 5.1
+  interpreted stderr as a terminating NativeCommandError because the script
+  runs with $ErrorActionPreference = 'Stop'. The script stopped before it
+  could install Python.
+
+FIX IN 3.3.3
+  * Python, WinGet, Visual Studio discovery, resource compilation and SignTool
+    operations use System.Diagnostics.ProcessStartInfo where native processes
+    are called.
+  * stdout, stderr, timeouts, and return codes are captured separately.
+  * Missing-runtime output is no longer treated as a PowerShell exception.
+  * The script searches installed Python registry keys and common folders.
+  * It checks py.exe and pymanager.exe without letting native stderr abort.
+  * It asks the Python install manager for the exact executable using
+    `py list -1 --format=exe 3.12`, rather than assuming a fixed install path.
+  * PATH refresh includes `%LocalAppData%\Python\bin`, where the manager
+    normally exposes its global `py`, `python`, and `pip` command aliases.
+  * If absent, it installs the official Python install manager through
+    WinGet's msstore source (package ID 9NQ7512CXL7T).
+  * It provisions Python 3.12 with `py install 3.12` / `pymanager install 3.12`.
+  * It refreshes PATH and checks again.
+  * It falls back to WinGet package Python.Python.3.12.
+
+RUN
+  1. Extract the complete release folder (do not run from inside the ZIP).
+  2. Open Windows PowerShell or Command Prompt.
+  3. Right-click BUILD_AND_SIGN_WINDOWS.bat and run it.
+  4. Approve UAC when Windows asks to install MSVC/Windows SDK.
+  5. Keep internet access enabled while WinGet and pip install build tools.
+
+If the Python install manager completed but the runtime cannot be made
+available to the current process, open a NEW PowerShell window and run:
+  py install 3.12
+  py list -1 --format=exe 3.12
+  py -V:3.12 -c "import sys; print(sys.executable)"
+Then rerun BUILD_AND_SIGN_WINDOWS.bat.
+
+WIN GET / APP INSTALLER
+-----------------------
+If winget is not recognized or returns source errors:
+  * Install/update Microsoft App Installer from Microsoft Store.
+  * Run `winget source update` in a new terminal.
+  * Verify `winget --info` works.
+
+MSVC / WINDOWS SDK
+------------------
+The build requires:
+  * Visual Studio Build Tools with MSVC x64 C++ tools.
+  * Windows 10/11 SDK including rc.exe and SignTool.
+
+The script installs these via WinGet / Visual Studio Installer where possible.
+If automatic component modification fails, open Visual Studio Installer and
+modify Build Tools to include:
+  * Desktop development with C++ / MSVC x64/x86 build tools.
+  * Windows 11 SDK (or a compatible Windows 10 SDK).
+  * Windows SDK Signing Tools for Desktop Apps.
+  * Windows SDK resource compiler.
+
+BUILD OUTPUT
+------------
+dist\windows\exe\DiscordGlobalStatusMonitor.exe
+dist\windows\dll\discord_global_status.dll
+dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip
+
+SIGNING
+-------
+A local self-signed certificate is created and imported into the current
+user's Trusted Root and Trusted Publisher stores. This supports local test
+verification; it does not make Windows SmartScreen trust the publisher.
+Public distribution requires a CA-issued code-signing certificate.
+
+DLL RUNTIME
+-----------
+The CFFI DLL is Python-backed. It is not a fully self-contained native rewrite.
+Keep discord_server_global_status.py and the backends/ directory next to the
+DLL, or set DGSM_HOME to their directory. A compatible CPython 3.12 runtime is
+required by the host process.
+
+IF IT STILL FAILS
+-----------------
+Keep the complete PowerShell output and attach:
+  * dist\windows\signing\signing-report.txt (if generated)
+  * .build\windows logs / generated PyInstaller output
+  * your Windows version (`winver`)
+  * `winget --info`
+  * `py list` or `py --list` output
+
+Do not send API keys, signing private keys, or personal tokens in issue reports.

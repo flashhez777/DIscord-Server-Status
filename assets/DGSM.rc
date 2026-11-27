@@ -1,0 +1,3 @@
+// Discord Global Status Monitor application icon resource.
+// Compile from this directory so the icon path resolves reliably.
+1 ICON "DGSM.ico"

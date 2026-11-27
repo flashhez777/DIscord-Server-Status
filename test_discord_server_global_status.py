@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for Discord Global Status Monitor 3.2.1."""
+"""Offline unit tests for Discord Global Status Monitor 3.3.3."""
 
 import io
 import json
@@ -187,6 +187,197 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(any("Global status" in change for change in changes))
         self.assertTrue(any("Component" in change for change in changes))
         self.assertTrue(any("NEW INCIDENT" in change for change in changes))
+
+
+class GlobalpingRequestSchemaTests(unittest.TestCase):
+    def setUp(self):
+        monitor._TLS_CONTEXT = monitor.initialize_tls_context()
+
+    def _capture_create_payload(self, target):
+        with mock.patch.object(
+            monitor,
+            "globalping_request",
+            side_effect=[
+                ({"id": "measurement-1"}, {}),
+                ({"id": "measurement-1", "status": "finished"}, {}),
+            ],
+        ) as request, mock.patch.object(monitor.time, "sleep"):
+            result = monitor.create_globalping_measurement("http", target, 4, 5, None)
+        self.assertEqual(result["id"], "measurement-1")
+        args = request.call_args_list[0].args
+        self.assertEqual(args[0], "POST")
+        return args[4]
+
+    def test_gateway_http_target_is_split_into_hostname_and_http_options(self):
+        payload = self._capture_create_payload("https://discord.com/api/v10/gateway")
+        self.assertEqual(payload["target"], "discord.com")
+        self.assertEqual(payload["type"], "http")
+        self.assertEqual(payload["measurementOptions"], {
+            "protocol": "HTTPS",
+            "port": 443,
+            "request": {"method": "GET", "path": "/api/v10/gateway"},
+        })
+        self.assertNotIn("https://", payload["target"])
+
+    def test_cdn_http_target_preserves_path_and_query(self):
+        payload = self._capture_create_payload(
+            "https://cdn.discordapp.com/embed/avatars/0.png?size=128"
+        )
+        self.assertEqual(payload["target"], "cdn.discordapp.com")
+        self.assertEqual(
+            payload["measurementOptions"]["request"]["path"],
+            "/embed/avatars/0.png",
+        )
+        self.assertEqual(
+            payload["measurementOptions"]["request"]["query"],
+            "size=128",
+        )
+
+    def test_custom_http_port_is_preserved(self):
+        payload = self._capture_create_payload("http://status.example.test:8080/health")
+        self.assertEqual(payload["target"], "status.example.test")
+        self.assertEqual(payload["measurementOptions"]["protocol"], "HTTP")
+        self.assertEqual(payload["measurementOptions"]["port"], 8080)
+        self.assertEqual(payload["measurementOptions"]["request"]["path"], "/health")
+
+    def test_invalid_http_url_is_rejected_before_network_request(self):
+        with mock.patch.object(monitor, "globalping_request") as request:
+            with self.assertRaisesRegex(monitor.MonitorError, r"expected an http\(s\) URL"):
+                monitor.create_globalping_measurement("http", "not-a-url", 4, 5, None)
+        request.assert_not_called()
+
+    def test_validation_error_includes_parameter_details(self):
+        body = json.dumps({
+            "error": {
+                "type": "validation_error",
+                "message": "Parameter validation failed",
+                "params": {"target": "must be a hostname or IP address"},
+            }
+        }).encode("utf-8")
+        error = urllib.error.HTTPError(
+            "https://api.globalping.io/v1/measurements",
+            400,
+            "Bad Request",
+            {},
+            io.BytesIO(body),
+        )
+        with mock.patch.object(monitor.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(monitor.MonitorError) as caught:
+                monitor.globalping_request(
+                    "POST", "https://api.globalping.io/v1/measurements", 5,
+                    payload={"type": "http", "target": "https://discord.com"},
+                )
+        self.assertIn("Parameter validation failed", str(caught.exception))
+        self.assertIn("target", str(caught.exception))
+        self.assertIn("hostname or IP address", str(caught.exception))
+
+
+
+class RipeAtlasBackendTests(unittest.TestCase):
+    def test_parse_measurement_ids_deduplicates_and_validates(self):
+        from backends.ripe_atlas import parse_measurement_ids
+        self.assertEqual(parse_measurement_ids("123, 456,123"), [123, 456])
+
+    def test_parse_measurement_ids_rejects_non_numeric(self):
+        from backends.ripe_atlas import BackendError, parse_measurement_ids
+        with self.assertRaises(BackendError):
+            parse_measurement_ids("123,discord")
+
+    def test_parse_measurement_ids_caps_number_of_measurements(self):
+        from backends.ripe_atlas import BackendError, parse_measurement_ids
+        with self.assertRaises(BackendError):
+            parse_measurement_ids("1,2,3,4,5,6,7,8,9")
+
+    def test_normalize_ping_results_computes_rtt_and_loss(self):
+        from backends.ripe_atlas import normalize_results
+        normalized = normalize_results(1234, [{
+            "prb_id": 55,
+            "dst_name": "gateway.discord.gg",
+            "from": "192.0.2.10",
+            "timestamp": 1795800000,
+            "result": [{"rtt": 20.0}, {"rtt": 22.0}, {"x": "timeout"}],
+        }])
+        row = normalized["rows"][0]
+        self.assertEqual(row["probe_id"], 55)
+        self.assertAlmostEqual(row["latency_ms"], 21.0)
+        self.assertAlmostEqual(row["loss_pct"], 100 / 3)
+        self.assertAlmostEqual(normalized["summary"]["median_ms"], 21.0)
+
+    def test_latest_results_dict_shape_is_normalized_by_probe_id(self):
+        from backends.ripe_atlas import _get_json
+        payload = {
+            "1001": [{
+                "dst_name": "gateway.discord.gg",
+                "result": [{"rtt": 24.0}, {"rtt": 26.0}],
+            }],
+            "1002": [{
+                "dst_name": "gateway.discord.gg",
+                "result": [{"rtt": 40.0}, {"x": "timeout"}],
+            }],
+        }
+        response = FakeResponse(payload)
+        context = ssl.create_default_context()
+        with mock.patch("backends.ripe_atlas.urllib.request.urlopen", return_value=response) as urlopen:
+            rows = _get_json(9988, 5, context)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["prb_id"], "1001")
+        request = urlopen.call_args.args[0]
+        self.assertIn("/9988/latest/?", request.full_url)
+        self.assertIn("lookback_days=7", request.full_url)
+        self.assertIn("versions=1", request.full_url)
+
+    def test_collect_reads_existing_ids_without_creating_measurements(self):
+        from backends import ripe_atlas
+        record = {
+            "prb_id": 88,
+            "dst_name": "gateway.discord.gg",
+            "result": [{"rtt": 32.5}, {"rtt": 34.0}],
+        }
+        with mock.patch.object(ripe_atlas, "_get_json", return_value=[record]) as fetch:
+            result = ripe_atlas.collect("98765", 5, ssl.create_default_context())
+        fetch.assert_called_once()
+        self.assertEqual(result["provider"], "RIPE Atlas public probe network")
+        self.assertEqual(result["probes_count"], 1)
+        self.assertAlmostEqual(result["summary"]["median_ms"], 33.25)
+
+    def test_collect_no_ids_is_disabled_without_network(self):
+        from backends.ripe_atlas import collect
+        result = collect("", 5, ssl.create_default_context())
+        self.assertEqual(result["status"], "disabled")
+        self.assertEqual(result["rows"], [])
+
+
+class WindowsBuildBootstrapTests(unittest.TestCase):
+    def test_builder_uses_safe_process_capture_for_runtime_discovery(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Invoke-CapturedProcess", script)
+        self.assertIn("function Ensure-Python312", script)
+        self.assertIn("-Source 'msstore'", script)
+        self.assertIn("py install", script)
+        self.assertIn("'list', '-1', '--format=exe', '3.12'", script)
+        self.assertIn("$pythonManagerBin = Join-Path $env:LOCALAPPDATA 'Python\\bin'", script)
+        self.assertIn("System.Collections.Generic.HashSet[string]", script)
+        self.assertNotIn("& $launcher.Source -3.12", script)
+
+    def test_builder_stages_additional_backend_modules(self):
+        script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("Get-ChildItem -LiteralPath $BackendsDir -Filter '*.py' -File | Copy-Item -Destination $DllBackends -Force", script)
+        self.assertIn("Get-ChildItem -LiteralPath $BackendsDir -Filter '*.py' -File | Copy-Item -Destination $PackageBackends -Force", script)
+
+
+    def test_signing_uses_process_capture_not_native_call_operator(self):
+        signer = Path(__file__).with_name("sign_windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("function Invoke-CapturedProcess", signer)
+        self.assertIn("function Invoke-SignTool", signer)
+        self.assertNotIn("& $signTool.FullName sign", signer)
+
+    def test_github_actions_ci_workflow_exists(self):
+        workflow = Path(__file__).parent / ".github" / "workflows" / "ci.yml"
+        self.assertTrue(workflow.is_file())
+        text = workflow.read_text(encoding="utf-8")
+        self.assertIn("windows-latest", text)
+        self.assertIn("ubuntu-latest", text)
+        self.assertIn("test_discord_server_global_status.py", text)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,38 @@
+Discord Global Status Monitor v3.3.3
+====================================
+
+Release changes:
+- Fixed Python 3.12 runtime discovery when py.exe exists without CPython 3.12.
+- Captures stdout, stderr, exit codes and timeouts for Python, WinGet,
+  Visual Studio discovery, resource compilation and SignTool.
+- Searches PATH, Python registry entries, known install directories and
+  WindowsApps Python Manager package locations.
+- Installs Python install manager via WinGet and provisions CPython 3.12;
+  falls back to the standalone Python.Python.3.12 package.
+- Optional read-only RIPE Atlas backend now uses the latest-per-probe API with
+  a bounded seven-day lookback instead of downloading full measurement history.
+- Keeps Globalping worldwide probes, Discord Statuspage, local endpoint probes
+  and host network telemetry as separately labeled sources.
+- Adds GitHub Actions CI and GitHub-ready README / .txt backend docs.
+- Windows EXE and Python-backed C ABI DLL builds embed the DGSM network icon;
+  the Windows pipeline signs and verifies both with Authenticode.
+- Linux build creates a portable Python zipapp and a CPython-ABI-specific C
+  shared library.
+
+Offline tests: python3 -m unittest -v test_discord_server_global_status.py
+Windows build target: CPython 3.12 x64 + MSVC x64 + Windows SDK.
+
+Additional v3.3.3 Windows bootstrap hardening:
+- Uses `py list -1 --format=exe 3.12` to discover the exact managed runtime path.
+- Includes `%LocalAppData%\Python\bin` during PATH refresh.
+- Tries Python Manager's explicit `exec -V:3.12` launch form as a fallback.
+- Tests assert the manager-listing and PATH discovery paths are present.
+
+Final v3.3.3 verification in the Linux build environment:
+- Offline regression tests: 30/30 passed.
+- Python module compilation and GitHub Actions YAML parsing: passed.
+- Linux zipapp --version/--help smoke tests: passed.
+- Linux C ABI loaded via ctypes; version and last-error exports passed.
+- Linux detached RSA/SHA-256 signatures verified.
+- Windows PowerShell/MSVC build was not executable in this Linux environment;
+  use BUILD_AND_SIGN_WINDOWS.bat on Windows for actual PE compilation/signing.

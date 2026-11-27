@@ -1,0 +1,118 @@
+DGSM 3.3.3 - BACKEND ARCHITECTURE
+================================
+
+SCOPE
+-----
+All backends serve worldwide Discord platform status monitoring. There is no
+per-guild monitoring, Discord bot login, account tracking, or user telemetry.
+
+BACKEND 1: DISCORD STATUSPAGE (PRIMARY)
+--------------------------------------
+Source:
+  https://discordstatus.com/api/v2/summary.json
+
+Provides:
+  * Official global status indicator and description.
+  * Status components and component groups.
+  * Incidents and latest public incident updates.
+  * Scheduled and active maintenance.
+
+This is the authoritative published service-health source. Its update cadence
+is controlled by Discord; polling more frequently does not force faster
+incident publication.
+
+BACKEND 2: GLOBALPING (WORLDWIDE ACTIVE PROBES)
+-----------------------------------------------
+API:
+  https://api.globalping.io/v1
+
+Measures:
+  * ICMP ping to gateway.discord.gg.
+  * HTTPS timing to Discord REST Gateway and media CDN.
+  * DNS resolution for Discord Gateway hostnames.
+  * MTR/traceroute path diagnostics.
+  * Remote probe country/city/continent/network metadata when supplied.
+
+The client checks the provider's /v1/limits endpoint and respects rate limits.
+A token is optional:
+  GLOBALPING_API_TOKEN=<token>
+
+HTTP measurements must send a hostname/IP as `target`; scheme, port, path,
+and query are passed through `measurementOptions`. A URL must not be put in
+the target field.
+
+BACKEND 3: RIPE ATLAS (OPTIONAL INDEPENDENT WORLDWIDE SOURCE)
+------------------------------------------------------------
+API:
+  https://atlas.ripe.net/api/v2/measurements/{measurement_id}/latest/?format=json
+
+DGSM requests the most recent result version per probe (up to a seven-day
+lookback), rather than downloading the full historical result set. Configure:
+  RIPE_ATLAS_MEASUREMENT_IDS=12345678,12345679
+
+or run:
+  python discord_server_global_status.py --ripe-atlas-ids 12345678,12345679
+
+Optional API credential for authorized/private result access:
+  RIPE_ATLAS_API_KEY=<api-key>
+
+Important:
+  * The backend is READ-ONLY. It never creates or schedules measurements.
+  * It does not spend credits.
+  * The IDs must refer to measurements that actually target Discord endpoints
+    for the results to be relevant to Discord.
+  * Public latest-result retrieval can be anonymous. Private results require
+    proper authorization and are subject to RIPE Atlas permissions.
+  * HTTP 429 responses are surfaced with the provider's Retry-After hint;
+    DGSM does not spin up retries or create extra measurements automatically.
+  * Result rows identify probe IDs and source IPs where available. No location
+    enrichment is fabricated when the result API does not include it.
+
+BACKEND 4: LOCAL CONNECTIVITY PROBES
+------------------------------------
+Measured from the PC running DGSM:
+  * Discord REST API response latency.
+  * Discord Gateway WebSocket handshake and TLS reachability.
+  * Discord media CDN response latency.
+  * Local DNS resolver timing.
+  * TLS validation and certificate-chain diagnostics.
+
+These are local vantage-point results, not worldwide data-center latency.
+
+BACKEND 5: HOST NETWORK TELEMETRY
+--------------------------------
+When psutil or supported OS counters are available:
+  * RX/TX throughput (Mbps).
+  * RX/TX packet rates.
+  * Interface error and drop deltas.
+
+These counters describe the local host only.
+
+DATA AND ERROR MODEL
+--------------------
+All backend records include the provider, vantage, timestamp/status, and
+measurement summary where applicable. A provider failure is displayed as a
+backend error; it is not silently converted to a Discord outage. The
+Dashboard keeps official Discord status, remote probes, and local probes
+separate to avoid false conclusions.
+
+ADDING A BACKEND
+----------------
+New providers should implement the same conceptual contract:
+  collect(configuration, timeout, verified_tls_context) -> dict
+
+Recommended output keys:
+  type, provider, vantage, target, status, completed_at, rows, summary, error
+
+Recommended summary keys:
+  probe_results, successful_samples, median_ms, p95_ms, min_ms, max_ms,
+  median_loss_pct, up, warn, down
+
+Requirements for new providers:
+  * Use HTTPS with certificate and hostname validation.
+  * Bound requests with explicit timeouts and response-size limits.
+  * Respect rate limits / Retry-After.
+  * Do not retry non-idempotent POST operations automatically.
+  * Label local, regional, and remote probe vantage points accurately.
+  * Never present external probe results as Discord-internal telemetry.
+  * Do not log API keys or bearer tokens.

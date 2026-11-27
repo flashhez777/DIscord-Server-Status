@@ -33,8 +33,10 @@ import subprocess
 import sys
 import textwrap
 import time
+from backends.ripe_atlas import collect as collect_ripe_atlas, BackendError as RipeAtlasBackendError
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -42,7 +44,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 APP_NAME = "Discord Global Status Monitor"
-VERSION = "3.2.1"
+VERSION = "3.3.3"
 STATUS_PAGE = "https://discordstatus.com"
 SUMMARY_URL = "https://discordstatus.com/api/v2/summary.json"
 REST_GATEWAY_URL = "https://discord.com/api/v10/gateway"
@@ -214,6 +216,12 @@ def parse_args() -> argparse.Namespace:
                         help="Run a worldwide MTR route trace immediately at startup.")
     parser.add_argument("--globalping-token-env", default="GLOBALPING_API_TOKEN",
                         help="Environment variable containing an optional Globalping bearer token.")
+    parser.add_argument("--no-ripe-atlas", action="store_true",
+                        help="Disable the optional RIPE Atlas public-measurement backend.")
+    parser.add_argument("--ripe-atlas-ids", default=os.environ.get("RIPE_ATLAS_MEASUREMENT_IDS", ""),
+                        help="Comma-separated existing public RIPE Atlas measurement IDs (or RIPE_ATLAS_MEASUREMENT_IDS env var).")
+    parser.add_argument("--ripe-interval", type=float, default=1800,
+                        help="RIPE Atlas public-results refresh interval in seconds (minimum 300).")
     parser.add_argument("--telemetry-history", action="store_true",
                         help="Display saved worldwide telemetry samples and exit.")
     parser.add_argument("--doctor", action="store_true",
@@ -235,6 +243,14 @@ def parse_args() -> argparse.Namespace:
     for name in ("global_interval", "http_interval", "dns_interval", "cdn_interval", "trace_interval"):
         if getattr(args, name) < 60:
             parser.error(f"--{name.replace('_', '-')} must be at least 60 seconds")
+    if args.ripe_interval < 300:
+        parser.error("--ripe-interval must be at least 300 seconds")
+    if args.ripe_atlas_ids and not args.no_ripe_atlas:
+        try:
+            from backends.ripe_atlas import parse_measurement_ids
+            parse_measurement_ids(args.ripe_atlas_ids)
+        except Exception as exc:
+            parser.error(str(exc))
     # Globalping counts probe executions as tests. Keep defaults well below
     # its published anonymous hourly budget and account for custom settings.
     estimated = (
@@ -832,11 +848,23 @@ def globalping_request(method: str, url: str, timeout: float,
                 if isinstance(error_data, dict):
                     err = error_data.get("error")
                     if isinstance(err, dict):
-                        detail = str(err.get("message") or "")
+                        detail = str(err.get("message") or err.get("type") or "")
+                        params = err.get("params") or err.get("details")
+                        if isinstance(params, dict) and params:
+                            param_text = "; ".join(
+                                f"{key}: {value}" for key, value in params.items()
+                            )
+                            detail = f"{detail} | parameters: {param_text}" if detail else param_text
+                        elif isinstance(params, list) and params:
+                            detail = f"{detail} | parameters: {clip(params, 1200)}" if detail else clip(params, 1200)
                     elif err:
                         detail = str(err)
                     elif error_data.get("message"):
                         detail = str(error_data.get("message"))
+                    if not detail and isinstance(error_data.get("params"), dict):
+                        detail = "; ".join(
+                            f"{key}: {value}" for key, value in error_data["params"].items()
+                        )
             except Exception:
                 pass
             retry = exc.headers.get("Retry-After") if exc.headers else None
@@ -917,7 +945,12 @@ def fetch_globalping_limits(args: argparse.Namespace) -> dict[str, Any]:
 
 def create_globalping_measurement(test_type: str, target: str, probe_limit: int,
                                   timeout: float, token: Optional[str]) -> dict[str, Any]:
-    """Submit one asynchronous Globalping test and poll at a conservative interval."""
+    """Submit a schema-valid Globalping test and poll it conservatively.
+
+    Globalping's `target` field is a hostname/IP, not a URL. For HTTP tests,
+    protocol, port and path must be expressed in `measurementOptions`.
+    Keeping these separate avoids the API's HTTP 400 target validation error.
+    """
     payload: dict[str, Any] = {
         "type": test_type,
         "target": target,
@@ -926,10 +959,32 @@ def create_globalping_measurement(test_type: str, target: str, probe_limit: int,
     if test_type == "ping":
         payload["measurementOptions"] = {"packets": 3}
     elif test_type in {"http", "cdn"}:
-        # Globalping defaults HTTP measurements to HEAD; use GET so Discord
-        # endpoints return their full response/timing breakdown.
-        payload["measurementOptions"] = {"request": {"method": "GET"}}
-    # No locations means Globalping's default worldwide probe selection.
+        parsed = urlsplit(target)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise MonitorError(
+                f"Invalid Globalping HTTP target {target!r}: expected an http(s) URL."
+            )
+        try:
+            port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        except ValueError as exc:
+            raise MonitorError(f"Invalid port in Globalping HTTP target {target!r}: {exc}") from exc
+        if not 1 <= port <= 65535:
+            raise MonitorError(f"Invalid port in Globalping HTTP target: {port}")
+        # The API's target schema accepts only a hostname/IP. The URL path,
+        # query, protocol and port belong in the HTTP measurement options.
+        payload["target"] = parsed.hostname
+        request_options: dict[str, Any] = {
+            "method": "GET",
+            "path": parsed.path or "/",
+        }
+        if parsed.query:
+            request_options["query"] = parsed.query
+        payload["measurementOptions"] = {
+            "protocol": parsed.scheme.upper(),
+            "port": port,
+            "request": request_options,
+        }
+    # No locations means Globalping selects probes from its worldwide pool.
     started = time.perf_counter()
     created, _ = globalping_request("POST", GLOBALPING_MEASUREMENTS, timeout, token, payload)
     measurement_id = created.get("id")
@@ -1116,6 +1171,39 @@ def run_global_telemetry(test_type: str, args: argparse.Namespace) -> dict[str, 
             "rows": [],
             "summary": {},
             "error": str(exc),
+        }
+
+
+def run_ripe_atlas_telemetry(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect optional read-only measurements from existing RIPE Atlas IDs."""
+    try:
+        return collect_ripe_atlas(
+            args.ripe_atlas_ids,
+            args.timeout,
+            tls_context(),
+            os.environ.get("RIPE_ATLAS_API_KEY") or None,
+        )
+    except RipeAtlasBackendError as exc:
+        return {
+            "type": "ripe_atlas",
+            "provider": "RIPE Atlas public probe network",
+            "vantage": "remote RIPE Atlas probes",
+            "status": "error",
+            "rows": [],
+            "summary": {},
+            "error": str(exc),
+            "completed_at": iso_now(),
+        }
+    except Exception as exc:
+        return {
+            "type": "ripe_atlas",
+            "provider": "RIPE Atlas public probe network",
+            "vantage": "remote RIPE Atlas probes",
+            "status": "error",
+            "rows": [],
+            "summary": {},
+            "error": f"Unexpected RIPE Atlas backend error: {type(exc).__name__}: {exc}",
+            "completed_at": iso_now(),
         }
 
 
@@ -1626,7 +1714,7 @@ def render_dashboard(
         out.append(paint(f"    Globalping quota lookup unavailable: {clip(global_limits_error, width - 45)}", YELLOW, use_color))
     else:
         out.append("    Globalping provider quota: waiting for first lookup.")
-    if global_telemetry:
+    if global_telemetry and any(kind in global_telemetry for kind in ("ping", "http", "dns", "cdn", "mtr")):
         for kind in ("ping", "http", "dns", "cdn", "mtr"):
             measurement = global_telemetry.get(kind)
             if not measurement:
@@ -1692,6 +1780,32 @@ def render_dashboard(
     else:
         out.append("    Waiting for the first scheduled worldwide probe measurement.")
 
+    ripe = global_telemetry.get("ripe_atlas") if global_telemetry else None
+    if ripe:
+        out.append("")
+        out.append(paint("  INDEPENDENT WORLDWIDE BACKEND  (RIPE Atlas public probes)", MAGENTA, use_color, True))
+        if ripe.get("error"):
+            out.append(paint(f"    ERROR: {clip(ripe['error'], width - 18)}", YELLOW, use_color))
+        else:
+            summary = ripe.get("summary") if isinstance(ripe.get("summary"), dict) else {}
+            median = summary.get("median_ms")
+            p95 = summary.get("p95_ms")
+            median_text = f"p50 {median:.1f} ms" if isinstance(median, (int, float)) else "latency n/a"
+            if isinstance(p95, (int, float)):
+                median_text += f" / p95 {p95:.1f} ms"
+            out.append(
+                f"    {str(ripe.get('status', 'unknown')).upper():<8} {median_text:<24} "
+                f"probes={ripe.get('probes_count', 0)}  target={clip(ripe.get('target', ''), width - 65)}"
+            )
+            if ripe.get("measurement_ids"):
+                out.append(f"    Measurement IDs: {', '.join(str(x) for x in ripe['measurement_ids'])}")
+            for provider_error in ripe.get("errors", [])[:3]:
+                out.append(paint(f"    Provider note: {clip(provider_error, width - 22)}", YELLOW, use_color))
+    else:
+        out.append("")
+        out.append(paint("  RIPE ATLAS BACKEND", MAGENTA, use_color, True))
+        out.append("    Optional: set RIPE_ATLAS_MEASUREMENT_IDS to existing public measurement IDs.")
+
     out.append("")
     out.append(paint("  RECENT STATUS CHANGES", CYAN, use_color, True))
     if events:
@@ -1702,7 +1816,7 @@ def render_dashboard(
 
     out.append("")
     out.append(paint(rule, DIM, use_color))
-    out.append(paint("  Ctrl+C to stop  |  Discord status page + Globalping remote probes  |  Optional Globalping token raises limits", DIM, use_color))
+    out.append(paint("  Ctrl+C to stop  |  Discord Statuspage + Globalping + optional RIPE Atlas + local probes", DIM, use_color))
     print("\n".join(out), flush=True)
 
 
@@ -1808,6 +1922,8 @@ def main() -> int:
         max_workers=2, thread_name_prefix="globalping"
     )
     pending_global: dict[str, concurrent.futures.Future] = {}
+    pending_ripe_atlas: Optional[concurrent.futures.Future] = None
+    next_ripe_atlas_due = started_at
 
     try:
         while True:
@@ -2003,6 +2119,50 @@ def main() -> int:
                             append_event_log(event_path, telemetry_events)
                     if args.beep and sys.stdout.isatty() and telemetry_events:
                         print("\a", end="", flush=True)
+
+            # Independent RIPE Atlas backend is not coupled to Globalping; it
+            # continues to operate when --no-globalping is selected. This reads
+            # existing public measurements only and never creates paid tests.
+            now_mono = time.monotonic()
+            if (
+                not args.no_ripe_atlas
+                and args.ripe_atlas_ids.strip()
+                and now_mono >= next_ripe_atlas_due
+                and pending_ripe_atlas is None
+            ):
+                print("[RIPE Atlas] Queued read-only public measurement results ...", file=sys.stderr)
+                pending_ripe_atlas = global_executor.submit(run_ripe_atlas_telemetry, args)
+                next_ripe_atlas_due = now_mono + args.ripe_interval
+            if (args.once or args.json) and pending_ripe_atlas is not None:
+                try:
+                    pending_ripe_atlas.result(timeout=100)
+                except Exception:
+                    pass
+            if pending_ripe_atlas is not None and pending_ripe_atlas.done():
+                try:
+                    ripe_measurement = pending_ripe_atlas.result()
+                except Exception as exc:
+                    ripe_measurement = {
+                        "type": "ripe_atlas",
+                        "provider": "RIPE Atlas public probe network",
+                        "status": "error",
+                        "rows": [],
+                        "summary": {},
+                        "error": str(exc),
+                        "completed_at": iso_now(),
+                    }
+                global_telemetry["ripe_atlas"] = ripe_measurement
+                if not args.no_save and not ripe_measurement.get("error"):
+                    append_telemetry_log(telemetry_path, ripe_measurement)
+                if ripe_measurement.get("error"):
+                    message = f"RIPE Atlas backend: {ripe_measurement['error']}"
+                    events.append((now_local().strftime("%H:%M:%S"), message))
+                    if not args.no_save:
+                        append_event_log(event_path, [message])
+                    if notifications_enabled:
+                        send_desktop_notification("RIPE Atlas telemetry unavailable", message)
+                pending_ripe_atlas = None
+
 
             if args.json:
                 output_json(last_payload, last_latency, last_probes, last_error, global_telemetry, host_rates, global_limits)

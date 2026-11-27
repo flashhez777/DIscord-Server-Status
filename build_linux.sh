@@ -2,81 +2,83 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_BIN="${PYTHON:-python3}"
 BUILD_DIR="$ROOT/.build/linux"
 VENV="$BUILD_DIR/venv"
+STAGE="$BUILD_DIR/app"
 DIST="$ROOT/dist/linux"
+PYTHON_BIN="${PYTHON_BIN:-$(command -v python3 || true)}"
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
-  echo "Python 3 is required. Install python3 first." >&2
-  exit 1
+step() { printf '\n\033[1;36m==> %s\033[0m\n' "$1"; }
+fail() { printf '\nBUILD FAILED: %s\n' "$1" >&2; exit 1; }
+
+[[ -n "$PYTHON_BIN" ]] || fail 'python3 was not found. Install Python 3 and rerun.'
+"$PYTHON_BIN" -c 'import sys; assert sys.version_info >= (3, 9), sys.version' \
+  || fail 'Python 3.9 or newer is required.'
+
+if ! command -v gcc >/dev/null 2>&1 && ! command -v cc >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+    step 'Installing native Linux compiler prerequisites'
+    sudo apt-get update
+    sudo apt-get install -y build-essential python3-dev
+  else
+    fail 'A C compiler is required for the .so. Install build-essential and Python development headers.'
+  fi
 fi
 
+step 'Creating isolated build virtual environment'
 mkdir -p "$BUILD_DIR" "$DIST"
 if [[ ! -x "$VENV/bin/python" ]]; then
   "$PYTHON_BIN" -m venv "$VENV" || {
-    echo "Could not create a virtual environment. On Kali/Debian install: sudo apt install python3-venv" >&2
-    exit 1
+    if command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+      step 'Installing Python venv support'
+      sudo apt-get update
+      sudo apt-get install -y python3-venv python3-full
+      "$PYTHON_BIN" -m venv "$VENV"
+    else
+      fail 'venv module is unavailable. Install python3-venv/python3-full and rerun.'
+    fi
   }
 fi
+VENV_PY="$VENV/bin/python"
 
-PY="$VENV/bin/python"
-HAS_PYINSTALLER=0
-if "$PY" -m pip install --upgrade pip && \
-   "$PY" -m pip install --upgrade pyinstaller cffi certifi psutil dnspython plyer; then
-  HAS_PYINSTALLER=1
-else
-  echo "WARNING: Build dependency download failed (often DNS/TLS/proxy related)." >&2
-  echo "The standard-library Python zipapp will still be created." >&2
-fi
+step 'Installing Linux build dependencies into the private venv'
+"$VENV_PY" -m pip install --upgrade pip setuptools wheel
+"$VENV_PY" -m pip install --upgrade -r "$ROOT/requirements-linux-build.txt"
+"$VENV_PY" -c 'import cffi, setuptools; print("CFFI and setuptools are ready.")'
 
-rm -rf "$BUILD_DIR/pyinstaller-work" "$BUILD_DIR/spec"
-if [[ "$HAS_PYINSTALLER" -eq 1 ]]; then
-  "$PY" -m PyInstaller \
-    --clean --noconfirm --onefile --console \
-    --name discord-global-status \
-    --distpath "$DIST" \
-    --workpath "$BUILD_DIR/pyinstaller-work" \
-    --specpath "$BUILD_DIR/spec" \
-    --collect-all certifi \
-    --collect-all psutil \
-    --collect-all dns \
-    --collect-all plyer \
-    --hidden-import colorama \
-    "$ROOT/discord_server_global_status.py"
-else
-  echo "Skipping ELF freezer build because PyInstaller is unavailable." >&2
-fi
+step 'Creating portable Python zipapp'
+rm -rf "$STAGE"
+mkdir -p "$STAGE" "$DIST"
+cp "$ROOT/discord_server_global_status.py" "$STAGE/"
+mkdir -p "$STAGE/backends"
+find "$ROOT/backends" -maxdepth 1 -type f -name '*.py' -exec cp -t "$STAGE/backends" -- {} +
+"$VENV_PY" -m zipapp "$STAGE" \
+  --output "$DIST/DiscordGlobalStatusMonitor.pyz" \
+  --python '/usr/bin/env python3' \
+  --main 'discord_server_global_status:main'
+chmod 755 "$DIST/DiscordGlobalStatusMonitor.pyz"
+"$VENV_PY" "$DIST/DiscordGlobalStatusMonitor.pyz" --version
 
-"$PYTHON_BIN" "$ROOT/create_python_zipapp.py" --output "$DIST/DiscordGlobalStatusMonitor.pyz"
+step 'Compiling the Linux C ABI shared library'
+"$VENV_PY" "$ROOT/discord_monitor_dll_build.py" --output-dir "$DIST"
 cp "$ROOT/discord_server_global_status.py" "$DIST/"
+rm -rf "$DIST/backends"
+mkdir -p "$DIST/backends"
+find "$ROOT/backends" -maxdepth 1 -type f -name '*.py' -exec cp -t "$DIST/backends" -- {} +
 cp "$ROOT/discord_global_status.h" "$DIST/"
 
-# Build a Python-backed native shared library as an optional C integration API.
-# Use the build venv if CFFI was downloaded, otherwise reuse system CFFI if present.
-if "$PY" -c 'import cffi' >/dev/null 2>&1; then
-  "$PY" "$ROOT/discord_monitor_dll_build.py" --output-dir "$DIST" || \
-    echo "WARNING: native .so wrapper failed; Python zipapp remains available." >&2
-elif "$PYTHON_BIN" -c 'import cffi' >/dev/null 2>&1; then
-  "$PYTHON_BIN" "$ROOT/discord_monitor_dll_build.py" --output-dir "$DIST" || \
-    echo "WARNING: native .so wrapper failed; Python zipapp remains available." >&2
-else
-  echo "CFFI/compiler not available; skipping optional .so wrapper." >&2
-fi
-# CFFI emits intermediate C/object files beside the library; they are not
-# runtime deliverables and are kept out of the release directory.
-rm -f "$DIST/_dgsm_embed.c" "$DIST/_dgsm_embed.o"
+step 'Running artifact smoke tests'
+file "$DIST/DiscordGlobalStatusMonitor.pyz" "$DIST"/*.so
+"$VENV_PY" "$DIST/DiscordGlobalStatusMonitor.pyz" --help >/dev/null
 
-SIGN_TARGETS=("$DIST/DiscordGlobalStatusMonitor.pyz" "$DIST/discord_server_global_status.py")
-[[ -f "$DIST/discord-global-status" ]] && SIGN_TARGETS+=("$DIST/discord-global-status")
-[[ -f "$DIST/discord_global_status.so" ]] && SIGN_TARGETS+=("$DIST/discord_global_status.so")
-if [[ -f "$ROOT/sign_linux.sh" && -t 0 ]]; then
-  bash "$ROOT/sign_linux.sh" "${SIGN_TARGETS[@]}" || \
-    echo "WARNING: detached signing was skipped or incomplete; see sign_linux.sh." >&2
+step 'Signing Linux artifacts (local development certificate)'
+if [[ "${DGSM_SKIP_SIGNING:-0}" != '1' ]]; then
+  chmod +x "$ROOT/sign_linux.sh"
+  "$ROOT/sign_linux.sh" "$DIST/DiscordGlobalStatusMonitor.pyz" "$DIST"/*.so
 else
-  echo "Signing is available with: bash sign_linux.sh <artifact files>" >&2
+  echo 'Signing skipped because DGSM_SKIP_SIGNING=1.'
 fi
 
-printf '\nBuild complete. Outputs:\n'
-find "$DIST" -maxdepth 1 -type f -printf '  %f (%s bytes)\n' | sort
-printf '\nRun: %s\n' "$ROOT/RUN_DISCORD_STATUS.sh"
+step 'Linux build completed'
+printf 'Zipapp: %s\n' "$DIST/DiscordGlobalStatusMonitor.pyz"
+printf 'Library: %s\n' "$DIST"/*.so

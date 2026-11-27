@@ -1,6 +1,5 @@
-# The Python script installs these automatically into a private app data folder.
-certifi>=2026.11.20
-psutil>=6.0.0
-dnspython>=2.7.0
+# The Python script installs these automatically into a private app-local folder.
 plyer>=2.1.0
+dnspython>=2.7.0
+psutil>=6.0.0
 colorama>=0.4.6; platform_system == "Windows"

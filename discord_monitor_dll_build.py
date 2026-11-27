@@ -20,11 +20,11 @@ from pathlib import Path
 
 from cffi import FFI
 
-VERSION = "3.2.1"
+VERSION = "3.3.3"
 MODULE_NAME = "_dgsm_embed"
 
 
-def make_builder() -> FFI:
+def make_builder(resource_file: Path | None = None) -> FFI:
     ffibuilder = FFI()
     ffibuilder.embedding_api(
         """
@@ -34,11 +34,20 @@ def make_builder() -> FFI:
         int dgsm_run_monitor(void);
         """
     )
+    link_args = []
+    if resource_file is not None:
+        resource_file = resource_file.resolve()
+        if not resource_file.is_file():
+            raise FileNotFoundError(f"Windows resource file not found: {resource_file}")
+        # MSVC link.exe accepts a compiled .res input; this embeds the DGSM
+        # application icon in the DLL's PE resources as well as the EXE icon.
+        link_args.append(str(resource_file))
     ffibuilder.set_source(
         MODULE_NAME,
         r"""
         #include <string.h>
         """,
+        extra_link_args=link_args,
     )
     ffibuilder.embedding_init_code(
         r'''
@@ -49,7 +58,7 @@ from pathlib import Path
 from _dgsm_embed import ffi
 
 _DGSM_LAST_ERROR = ""
-_DGSM_VERSION = "3.2.1"
+_DGSM_VERSION = "3.3.3"
 
 
 def _find_app_dir():
@@ -144,6 +153,10 @@ def dgsm_run_monitor():
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build the DGSM C ABI DLL/SO wrapper")
     parser.add_argument("--output-dir", type=Path, default=Path("dist/native"))
+    parser.add_argument(
+        "--resource-file", type=Path, default=None,
+        help="Optional compiled Windows .res file to embed icon/version resources.",
+    )
     args = parser.parse_args()
 
     output_dir = args.output_dir.resolve()
@@ -153,7 +166,7 @@ def main() -> int:
     if not source_file.is_file():
         parser.error(f"Python monitor source is missing: {source_file}")
 
-    ffibuilder = make_builder()
+    ffibuilder = make_builder(args.resource_file)
     old_cwd = Path.cwd()
     try:
         os.chdir(output_dir)

@@ -18,19 +18,18 @@ KEY="${DGSM_SIGN_KEY:-$SIGN_HOME/dgsm-code-signing.key.pem}"
 CERT="${DGSM_SIGN_CERT:-$SIGN_HOME/dgsm-code-signing-cert.pem}"
 
 if [[ ! -f "$KEY" || ! -f "$CERT" ]]; then
-  echo "Creating a local self-signed development code-signing certificate."
-  echo "OpenSSL will ask for a private-key passphrase. Keep it private."
+  echo "Creating a local development signing key (file permissions restricted to the current user)."
   umask 077
-  PASS_ARGS=()
+  KEY_ARGS=(-nodes)
   if [[ -n "${DGSM_SIGN_PASSPHRASE:-}" ]]; then
-    PASS_ARGS=(-passout env:DGSM_SIGN_PASSPHRASE)
+    KEY_ARGS=(-passout env:DGSM_SIGN_PASSPHRASE)
   fi
   openssl req -x509 -newkey rsa:3072 -sha256 -days 825 \
     -keyout "$KEY" -out "$CERT" \
     -subj "/CN=Discord Global Status Monitor Local Developer/" \
     -addext "basicConstraints=critical,CA:FALSE" \
     -addext "keyUsage=critical,digitalSignature" \
-    -addext "extendedKeyUsage=codeSigning" "${PASS_ARGS[@]}"
+    -addext "extendedKeyUsage=codeSigning" "${KEY_ARGS[@]}"
   chmod 600 "$KEY"
   chmod 644 "$CERT"
 fi
@@ -39,6 +38,12 @@ if [[ ! -f "$KEY" || ! -f "$CERT" ]]; then
   echo "Signing key or certificate is missing." >&2
   exit 2
 fi
+
+# The private key is explicitly chmod 0600 above. Restore a normal umask so
+# public detached signatures, certificates and checksum manifests are readable.
+umask 022
+chmod 600 "$KEY"
+chmod 644 "$CERT"
 
 OUT_DIR="${DGSM_SIGN_OUTPUT_DIR:-$ROOT/dist/linux}"
 mkdir -p "$OUT_DIR"
@@ -57,6 +62,7 @@ for FILE in "$@"; do
     openssl dgst -sha256 -sign "$KEY" -out "${FILE}.sig" "$FILE"
   fi
   openssl dgst -sha256 -verify "$PUBKEY" -signature "${FILE}.sig" "$FILE"
+  chmod 644 "${FILE}.sig"
   echo "Signature verified: ${FILE}.sig"
   SIGNED=$((SIGNED + 1))
 done
