@@ -1,4 +1,5 @@
 # DIscord-Server-Status
 DIscord Server Status is python script what watch/trace in real time Discord Server Status
 ___________________________________________________________________________________________
-<img width="1920" height="1080" alt="Screenshot_2026-11-26_08_57_21" src="https://github.com/user-attachments/assets/83f01eea-7f7a-490a-84d7-3fc008757381" />
+<img width="1907" height="1025" alt="Capture" src="https://github.com/user-attachments/assets/6d47651a-3a9a-474f-9d8f-b63c30aaa18a" />
+
