@@ -1,0 +1,11 @@
+Discord Global Status Monitor 3.2.1
+Cross-platform global Discord public status and independent network telemetry.
+
+Windows build: run build_windows.ps1 on Windows x64 with Visual Studio C++ Build
+Tools and Windows SDK SignTool installed. The build script produces and signs
+its own EXE and DLL; a Windows binary is not cross-compiled on Linux.
+
+Linux: run RUN_DISCORD_STATUS.sh. The included .pyz is portable Python 3.9+.
+The included optional .so targets CPython 3.13 x86_64 and is not standalone.
+
+Run ./validate_release.sh to execute offline checks.

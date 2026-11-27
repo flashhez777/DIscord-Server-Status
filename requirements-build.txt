@@ -1,0 +1,7 @@
+pyinstaller>=6.0
+cffi>=1.16
+certifi>=2026.11.20
+psutil>=6.0.0
+dnspython>=2.7.0
+plyer>=2.1.0
+colorama>=0.4.6; platform_system == "Windows"
