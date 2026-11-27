@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title Discord Global Status Monitor
+title Discord Global Status Monitor v3.1.0
 
 where py >nul 2>nul
 if not errorlevel 1 (

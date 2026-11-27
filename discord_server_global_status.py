@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 APP_NAME = "Discord Global Status Monitor"
-VERSION = "2.1.0"
+VERSION = "3.1.0"
 STATUS_PAGE = "https://discordstatus.com"
 SUMMARY_URL = "https://discordstatus.com/api/v2/summary.json"
 REST_GATEWAY_URL = "https://discord.com/api/v10/gateway"
@@ -49,6 +49,10 @@ CDN_TEST_URL = "https://cdn.discordapp.com/embed/avatars/0.png"
 GATEWAY_HOST = "gateway.discord.gg"
 GATEWAY_PORT = 443
 USER_AGENT = f"DiscordGlobalStatusMonitor/{VERSION} (+{STATUS_PAGE})"
+GLOBALPING_API = "https://api.globalping.io/v1"
+GLOBALPING_MEASUREMENTS = GLOBALPING_API + "/measurements"
+GLOBALPING_RATE_LIMITS = GLOBALPING_API + "/limits"
+GLOBALPING_DEFAULT_TARGET = "gateway.discord.gg"
 
 # ANSI palette. ANSI mode is enabled on Windows terminals where supported.
 RESET = "\033[0m"
@@ -186,6 +190,26 @@ def parse_args() -> argparse.Namespace:
                         help="Disable native desktop notifications.")
     parser.add_argument("--no-auto-install", action="store_true",
                         help="Do not automatically install optional packages.")
+    parser.add_argument("--no-globalping", action="store_true",
+                        help="Disable third-party worldwide measurements (Globalping).")
+    parser.add_argument("--global-probes", type=int, default=10,
+                        help="Number of worldwide probes for the periodic ping test (1-50).")
+    parser.add_argument("--global-interval", type=float, default=600,
+                        help="Worldwide ping interval in seconds (default: 10 minutes).")
+    parser.add_argument("--http-interval", type=float, default=900,
+                        help="Worldwide Discord HTTP test interval in seconds (default: 15 minutes).")
+    parser.add_argument("--dns-interval", type=float, default=1800,
+                        help="Worldwide DNS test interval in seconds (default: 30 minutes).")
+    parser.add_argument("--trace-interval", type=float, default=3600,
+                        help="Worldwide MTR route-trace interval in seconds (default: 60 minutes).")
+    parser.add_argument("--trace-probes", type=int, default=3,
+                        help="Worldwide MTR probe count (1-10).")
+    parser.add_argument("--trace-now", action="store_true",
+                        help="Run a worldwide MTR route trace immediately at startup.")
+    parser.add_argument("--globalping-token-env", default="GLOBALPING_API_TOKEN",
+                        help="Environment variable containing an optional Globalping bearer token.")
+    parser.add_argument("--telemetry-history", action="store_true",
+                        help="Display saved worldwide telemetry samples and exit.")
     parser.add_argument("--data-dir", type=Path, default=None,
                         help="Override the directory used for local state, vendor packages and event history.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
@@ -194,6 +218,28 @@ def parse_args() -> argparse.Namespace:
         parser.error("--interval must be at least 10 seconds to avoid excessive polling")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
+    if not 1 <= args.global_probes <= 50:
+        parser.error("--global-probes must be between 1 and 50")
+    if not 1 <= args.trace_probes <= 10:
+        parser.error("--trace-probes must be between 1 and 10")
+    for name in ("global_interval", "http_interval", "dns_interval", "trace_interval"):
+        if getattr(args, name) < 60:
+            parser.error(f"--{name.replace('_', '-')} must be at least 60 seconds")
+    # Globalping counts probe executions as tests. Keep defaults well below
+    # its published anonymous hourly budget and account for custom settings.
+    estimated = (
+        3600 / args.global_interval * args.global_probes
+        + 3600 / args.http_interval * min(10, max(1, args.global_probes - 2))
+        + 3600 / args.dns_interval * min(10, max(1, args.global_probes - 2))
+        + 3600 / args.trace_interval * args.trace_probes
+    )
+    budget = 450 if os.environ.get(args.globalping_token_env) else 220
+    if estimated > budget:
+        parser.error(
+            f"selected Globalping schedule estimates {estimated:.0f} tests/hour; "
+            f"limit is kept below {budget}/hour. Increase telemetry intervals or "
+            "reduce probe counts (an optional bearer token is supported)."
+        )
     return args
 
 
@@ -214,16 +260,39 @@ def bootstrap_optional_dependencies(args: argparse.Namespace, data_dir: Path) ->
     packages: list[tuple[str, str]] = []
     if not args.no_notifications:
         packages.append(("plyer", "plyer>=2.1.0"))
+    else:
+        RUNTIME_CAPABILITIES.append("Desktop notifications disabled")
+    # psutil provides per-interface host counters; dnspython adds resolver
+    # timing and answer visibility. Both have standard-library fallbacks.
+    packages.append(("psutil", "psutil>=6.0.0"))
+    packages.append(("dns", "dnspython>=2.7.0"))
     if os.name == "nt":
         packages.append(("colorama", "colorama>=0.4.6"))
-
-    if not packages:
-        RUNTIME_CAPABILITIES.append("Desktop notifications disabled")
-        return
 
     vendor_dir = data_dir / "vendor"
     if str(vendor_dir) not in sys.path:
         sys.path.insert(0, str(vendor_dir))
+
+    # Some Windows/Kali Python builds do not ship pip. Try Python's bundled
+    # ensurepip bootstrap first, scoped to the current user (never sudo).
+    if not args.no_auto_install:
+        pip_check = subprocess.run(
+            [sys.executable, "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=20, check=False
+        )
+        if pip_check.returncode != 0:
+            try:
+                pip_bootstrap = subprocess.run(
+                    [sys.executable, "-m", "ensurepip", "--upgrade", "--user"],
+                    capture_output=True, text=True, timeout=120, check=False
+                )
+                if pip_bootstrap.returncode == 0:
+                    RUNTIME_CAPABILITIES.append("pip: bootstrapped with ensurepip")
+                else:
+                    detail = (pip_bootstrap.stderr or pip_bootstrap.stdout or "ensurepip unavailable").strip()
+                    RUNTIME_CAPABILITIES.append(f"pip: automatic bootstrap unavailable ({clip(detail, 150)})")
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                RUNTIME_CAPABILITIES.append(f"pip: bootstrap failed ({clip(exc, 100)})")
 
     for module_name, requirement in packages:
         if _try_import(module_name):
@@ -489,17 +558,403 @@ def probe_cdn(timeout: float) -> ProbeResult:
 
 
 def run_local_probes(timeout: float) -> list[ProbeResult]:
-    tasks = [probe_rest_api, probe_gateway_websocket, probe_cdn]
+    tasks = [probe_rest_api, probe_gateway_websocket, probe_cdn, probe_local_dns]
     results: list[ProbeResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         futures = {executor.submit(task, timeout): task.__name__ for task in tasks}
         for future in concurrent.futures.as_completed(futures):
             try:
                 results.append(future.result())
             except Exception as exc:
                 results.append(ProbeResult(futures[future], "ERROR", None, str(exc)))
-    order = {"REST API": 0, "Gateway WS": 1, "Media CDN": 2}
+    order = {"REST API": 0, "Gateway WS": 1, "Media CDN": 2, "Local DNS": 3}
     return sorted(results, key=lambda item: order.get(item.name, 99))
+
+
+def globalping_request(method: str, url: str, timeout: float,
+                       token: Optional[str] = None,
+                       payload: Optional[dict[str, Any]] = None) -> tuple[dict[str, Any], dict[str, str]]:
+    """Call the public Globalping API; this runs tests from remote probes worldwide."""
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept": "application/json",
+        "Cache-Control": "no-cache",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(4 * 1024 * 1024)
+            response_headers = {str(k).lower(): str(v) for k, v in response.headers.items()}
+            data = json.loads(raw.decode("utf-8")) if raw else {}
+            if not isinstance(data, dict):
+                raise MonitorError("Globalping returned a non-object JSON response")
+            return data, response_headers
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:
+            raw_error = exc.read(64 * 1024)
+            error_data = json.loads(raw_error.decode("utf-8")) if raw_error else {}
+            if isinstance(error_data, dict):
+                err = error_data.get("error")
+                if isinstance(err, dict):
+                    detail = str(err.get("message") or "")
+                elif err:
+                    detail = str(err)
+        except Exception:
+            pass
+        retry = exc.headers.get("Retry-After") if exc.headers else None
+        suffix = f"; Retry-After={retry}s" if retry else ""
+        if exc.code == 429:
+            raise MonitorError(f"Globalping rate limit (HTTP 429){suffix}. Reduce probes/frequency or set {argsafe_env_name()}.") from exc
+        raise MonitorError(f"Globalping HTTP {exc.code}: {detail or exc.reason}{suffix}") from exc
+    except urllib.error.URLError as exc:
+        raise MonitorError(f"Globalping network error: {exc.reason}") from exc
+    except (TimeoutError, OSError) as exc:
+        raise MonitorError(f"Globalping connection error: {exc}") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MonitorError(f"Globalping returned invalid JSON: {exc}") from exc
+
+
+def argsafe_env_name() -> str:
+    return "GLOBALPING_API_TOKEN (optional bearer token)"
+
+
+def numeric(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def fetch_globalping_limits(args: argparse.Namespace) -> dict[str, Any]:
+    """Fetch the provider-reported current measurement quota/credit state."""
+    token = os.environ.get(args.globalping_token_env) or None
+    payload, _headers = globalping_request(
+        "GET", GLOBALPING_RATE_LIMITS, args.timeout, token
+    )
+    rate_limit = payload.get("rateLimit") if isinstance(payload.get("rateLimit"), dict) else {}
+    measurements = rate_limit.get("measurements") if isinstance(rate_limit.get("measurements"), dict) else {}
+    create = measurements.get("create") if isinstance(measurements.get("create"), dict) else {}
+    if not create:
+        raise MonitorError("Globalping limits response did not include measurement creation limits")
+    credits = payload.get("credits") if isinstance(payload.get("credits"), dict) else {}
+    return {
+        "type": str(create.get("type") or "unknown"),
+        "limit": numeric(create.get("limit")),
+        "remaining": numeric(create.get("remaining")),
+        "reset_seconds": numeric(create.get("reset")),
+        "credits_remaining": numeric(credits.get("remaining")),
+        "checked_at": iso_now(),
+    }
+
+
+def create_globalping_measurement(test_type: str, target: str, probe_limit: int,
+                                  timeout: float, token: Optional[str]) -> dict[str, Any]:
+    """Submit one asynchronous Globalping test and poll no faster than 2 req/s."""
+    payload: dict[str, Any] = {
+        "type": test_type,
+        "target": target,
+        "limit": probe_limit,
+    }
+    if test_type == "ping":
+        payload["measurementOptions"] = {"packets": 3}
+    elif test_type == "http":
+        # Globalping defaults HTTP measurements to HEAD; use GET so the
+        # Discord Gateway endpoint is actually exercised as an API request.
+        payload["measurementOptions"] = {"request": {"method": "GET"}}
+    # No locations means Globalping's default worldwide probe selection.
+    started = time.perf_counter()
+    created, _ = globalping_request("POST", GLOBALPING_MEASUREMENTS, timeout, token, payload)
+    measurement_id = created.get("id")
+    if not isinstance(measurement_id, str) or not measurement_id:
+        raise MonitorError(f"Globalping did not return a measurement ID: {clip(created, 200)}")
+
+    deadline = time.monotonic() + (75.0 if test_type in {"mtr", "traceroute"} else 45.0)
+    final: dict[str, Any] = created
+    while time.monotonic() < deadline:
+        # The API recommends waiting at least 500 ms after each response.
+        time.sleep(0.75)
+        final, _ = globalping_request(
+            "GET", f"{GLOBALPING_MEASUREMENTS}/{measurement_id}", timeout, token
+        )
+        status = str(final.get("status") or "").lower()
+        if status not in {"in-progress", "in_progress", "pending", "running", ""}:
+            break
+        if final.get("results") and status in {"finished", "completed"}:
+            break
+    else:
+        raise MonitorError(f"Globalping measurement {measurement_id} timed out while waiting for results")
+
+    final["_elapsed_ms"] = (time.perf_counter() - started) * 1000.0
+    final["_measurement_id"] = measurement_id
+    return final
+
+
+def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Globalping results to a stable, loggable telemetry record."""
+    rows: list[dict[str, Any]] = []
+    all_rtts: list[float] = []
+    all_losses: list[float] = []
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+
+    for entry in results:
+        if not isinstance(entry, dict):
+            continue
+        probe = entry.get("probe") if isinstance(entry.get("probe"), dict) else {}
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        stats = result.get("stats") if isinstance(result.get("stats"), dict) else {}
+        timings = result.get("timings") if isinstance(result.get("timings"), dict) else {}
+        loc = ", ".join(str(x) for x in (probe.get("city"), probe.get("country")) if x)
+        avg = numeric(stats.get("avg"))
+        loss = numeric(stats.get("loss"))
+        row: dict[str, Any] = {
+            "continent": str(probe.get("continent") or "?"),
+            "region": str(probe.get("region") or ""),
+            "country": str(probe.get("country") or "?"),
+            "city": str(probe.get("city") or "Unknown"),
+            "location": loc or str(probe.get("country") or "Unknown"),
+            "network": str(probe.get("network") or "unknown network"),
+            "asn": str(probe.get("asn") or ""),
+            "status": str(result.get("status") or "unknown"),
+            "latency_ms": avg,
+            "min_ms": numeric(stats.get("min")),
+            "max_ms": numeric(stats.get("max")),
+            "loss_pct": loss,
+            "http_status": result.get("statusCode"),
+            "dns_ms": numeric(timings.get("dns")),
+            "tcp_ms": numeric(timings.get("tcp")),
+            "tls_ms": numeric(timings.get("tls")),
+            "ttfb_ms": numeric(timings.get("firstByte")),
+            "total_ms": numeric(timings.get("total")),
+            "detail": "",
+            "hops": [],
+        }
+        if test_type == "ping":
+            if avg is not None:
+                all_rtts.append(avg)
+            if loss is not None:
+                all_losses.append(loss)
+            if result.get("error"):
+                row["detail"] = str(result.get("error"))
+            elif avg is None and result.get("rawOutput"):
+                row["detail"] = clip(result.get("rawOutput"), 160)
+            row["state"] = "UP" if avg is not None and (loss is None or loss < 100) else "WARN"
+        elif test_type == "http":
+            code = numeric(result.get("statusCode"))
+            total = numeric(timings.get("total"))
+            row["latency_ms"] = total
+            if total is not None:
+                all_rtts.append(total)
+            row["state"] = "UP" if code is not None and 200 <= code < 400 else "WARN" if code is not None and code < 500 else "DOWN"
+            row["detail"] = f"HTTP {int(code)}" if code is not None else str(result.get("error") or result.get("rawOutput") or "No HTTP status")
+        elif test_type == "dns":
+            dns_time = numeric(timings.get("total"))
+            row["latency_ms"] = dns_time
+            if dns_time is not None:
+                all_rtts.append(dns_time)
+            status_code = str(result.get("statusCode") or "unknown")
+            answers = result.get("answers") if isinstance(result.get("answers"), list) else []
+            row["state"] = "UP" if answers and status_code.lower() in {"noerror", "0", "success"} else "WARN"
+            row["detail"] = f"DNS {status_code}; {len(answers)} answer(s)"
+        elif test_type in {"mtr", "traceroute"}:
+            hops = result.get("hops") if isinstance(result.get("hops"), list) else []
+            hop_summaries = []
+            for hop in hops:
+                if not isinstance(hop, dict):
+                    continue
+                hop_stats = hop.get("stats") if isinstance(hop.get("stats"), dict) else {}
+                hop_avg = numeric(hop_stats.get("avg"))
+                hop_summaries.append({
+                    "address": str(hop.get("resolvedAddress") or "*"),
+                    "hostname": str(hop.get("resolvedHostname") or ""),
+                    "avg_ms": hop_avg,
+                    "loss_pct": numeric(hop_stats.get("loss")),
+                    "asn": hop.get("asn") or [],
+                })
+            row["hops"] = hop_summaries
+            last_hop = next((h for h in reversed(hop_summaries) if h.get("avg_ms") is not None), None)
+            row["latency_ms"] = last_hop.get("avg_ms") if last_hop else None
+            row["loss_pct"] = last_hop.get("loss_pct") if last_hop else None
+            if row["latency_ms"] is not None:
+                all_rtts.append(float(row["latency_ms"]))
+            row["state"] = "UP" if last_hop else "WARN"
+            row["detail"] = f"{len(hop_summaries)} hops; destination {result.get('resolvedAddress') or 'not reached'}"
+
+        rows.append(row)
+
+    good_rtts = sorted(all_rtts)
+    median_rtt = statistics.median(good_rtts) if good_rtts else None
+    summary = {
+        "probe_results": len(rows),
+        "successful_samples": len(good_rtts),
+        "median_ms": median_rtt,
+        "mean_ms": statistics.mean(good_rtts) if good_rtts else None,
+        "min_ms": min(good_rtts) if good_rtts else None,
+        "max_ms": max(good_rtts) if good_rtts else None,
+        "median_loss_pct": statistics.median(all_losses) if all_losses else None,
+        "up": sum(1 for row in rows if row.get("state") == "UP"),
+        "warn": sum(1 for row in rows if row.get("state") == "WARN"),
+        "down": sum(1 for row in rows if row.get("state") == "DOWN"),
+    }
+    return {
+        "type": test_type,
+        "target": target,
+        "status": str(data.get("status") or "unknown"),
+        "measurement_id": str(data.get("_measurement_id") or data.get("id") or ""),
+        "completed_at": iso_now(),
+        "elapsed_ms": numeric(data.get("_elapsed_ms")),
+        "probes_count": int(data.get("probesCount") or len(rows)),
+        "rows": rows,
+        "summary": summary,
+    }
+
+
+def run_global_telemetry(test_type: str, args: argparse.Namespace) -> dict[str, Any]:
+    token = os.environ.get(args.globalping_token_env) or None
+    targets = {
+        "ping": GLOBALPING_DEFAULT_TARGET,
+        "http": "https://discord.com/api/v10/gateway",
+        "dns": "gateway.discord.gg",
+        "mtr": GLOBALPING_DEFAULT_TARGET,
+        "traceroute": GLOBALPING_DEFAULT_TARGET,
+    }
+    limits = {
+        "ping": args.global_probes,
+        "http": min(10, max(1, args.global_probes - 2)),
+        "dns": min(10, max(1, args.global_probes - 2)),
+        "mtr": args.trace_probes,
+        "traceroute": args.trace_probes,
+    }
+    target = targets[test_type]
+    try:
+        raw = create_globalping_measurement(test_type, target, limits[test_type], args.timeout, token)
+        normalized = normalize_globalping_result(test_type, target, raw)
+        normalized["provider"] = "Globalping community probes"
+        normalized["vantage"] = "remote probes worldwide"
+        return normalized
+    except Exception as exc:
+        return {
+            "type": test_type,
+            "target": target,
+            "provider": "Globalping community probes",
+            "vantage": "remote probes worldwide",
+            "status": "error",
+            "completed_at": iso_now(),
+            "rows": [],
+            "summary": {},
+            "error": str(exc),
+        }
+
+
+def append_telemetry_log(path: Path, measurement: dict[str, Any], max_bytes: int = 5_000_000) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if path.exists() and path.stat().st_size > max_bytes:
+            backup = path.with_suffix(".previous.jsonl")
+            try:
+                if backup.exists():
+                    backup.unlink()
+                path.replace(backup)
+            except OSError:
+                pass
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(measurement, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        print(f"Warning: could not write telemetry history: {exc}", file=sys.stderr)
+
+
+def show_telemetry_history(path: Path, limit: int = 30) -> int:
+    print(f"{APP_NAME} - worldwide telemetry history")
+    print(f"Log: {path}")
+    if not path.exists():
+        print("No worldwide telemetry samples saved yet.")
+        return 0
+    rows: deque[dict[str, Any]] = deque(maxlen=limit)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                    if isinstance(row, dict):
+                        rows.append(row)
+                except json.JSONDecodeError:
+                    continue
+    except OSError as exc:
+        print(f"Could not read telemetry history: {exc}")
+        return 1
+    for sample in rows:
+        summary = sample.get("summary") if isinstance(sample.get("summary"), dict) else {}
+        median = summary.get("median_ms")
+        latency = f"{median:.1f} ms median" if isinstance(median, (int, float)) else "no latency summary"
+        print(f"[{sample.get('completed_at', '?')}] {str(sample.get('type', '?')).upper():<10} {sample.get('target', '?'):<36} {latency}; probes={sample.get('probes_count', 0)}")
+    return 0
+
+
+def local_network_counters() -> Optional[dict[str, Any]]:
+    """Read host network counters via psutil when installed."""
+    try:
+        psutil = importlib.import_module("psutil")
+        counters = psutil.net_io_counters()
+        if counters is None:
+            return None
+        return {
+            "bytes_sent": int(counters.bytes_sent),
+            "bytes_recv": int(counters.bytes_recv),
+            "packets_sent": int(counters.packets_sent),
+            "packets_recv": int(counters.packets_recv),
+            "errin": int(counters.errin),
+            "errout": int(counters.errout),
+            "dropin": int(counters.dropin),
+            "dropout": int(counters.dropout),
+            "sampled_at": time.monotonic(),
+        }
+    except Exception:
+        return None
+
+
+def calculate_local_network_rates(previous: Optional[dict[str, Any]],
+                                  current: Optional[dict[str, Any]]) -> Optional[dict[str, float]]:
+    if not previous or not current:
+        return None
+    elapsed = max(0.001, float(current["sampled_at"]) - float(previous["sampled_at"]))
+    rates = {
+        "rx_mbps": max(0.0, current["bytes_recv"] - previous["bytes_recv"]) * 8 / elapsed / 1_000_000,
+        "tx_mbps": max(0.0, current["bytes_sent"] - previous["bytes_sent"]) * 8 / elapsed / 1_000_000,
+        "rx_pps": max(0.0, current["packets_recv"] - previous["packets_recv"]) / elapsed,
+        "tx_pps": max(0.0, current["packets_sent"] - previous["packets_sent"]) / elapsed,
+        "errors": float(max(0, current["errin"] - previous["errin"]) + max(0, current["errout"] - previous["errout"])),
+        "drops": float(max(0, current["dropin"] - previous["dropin"]) + max(0, current["dropout"] - previous["dropout"])),
+    }
+    return rates
+
+
+def probe_local_dns(timeout: float) -> ProbeResult:
+    """Measure local DNS resolution time; dnspython is optional."""
+    started = time.perf_counter()
+    try:
+        dns = importlib.import_module("dns.resolver")
+        resolver = dns.Resolver(configure=True)
+        resolver.timeout = max(1.0, timeout / 2)
+        resolver.lifetime = timeout
+        answer = resolver.resolve("gateway.discord.gg", "A")
+        latency = (time.perf_counter() - started) * 1000.0
+        return ProbeResult("Local DNS", "UP", latency, f"{len(answer)} A record(s) via system resolver")
+    except ImportError:
+        try:
+            socket.getaddrinfo("gateway.discord.gg", 443, type=socket.SOCK_STREAM)
+            latency = (time.perf_counter() - started) * 1000.0
+            return ProbeResult("Local DNS", "UP", latency, "System getaddrinfo resolver; install dnspython for detailed DNS metrics")
+        except Exception as exc:
+            return ProbeResult("Local DNS", "DOWN", (time.perf_counter() - started) * 1000.0, str(exc))
+    except Exception as exc:
+        return ProbeResult("Local DNS", "DOWN", (time.perf_counter() - started) * 1000.0, str(exc))
 
 
 def latest_incident_update(item: dict[str, Any]) -> dict[str, Any]:
@@ -726,6 +1181,10 @@ def render_dashboard(
     latencies: dict[str, deque[float]],
     use_color: bool,
     stale: bool,
+    global_telemetry: Optional[dict[str, dict[str, Any]]] = None,
+    local_rates: Optional[dict[str, float]] = None,
+    global_limits: Optional[dict[str, Any]] = None,
+    global_limits_error: Optional[str] = None,
 ) -> None:
     columns = shutil.get_terminal_size((110, 34)).columns
     width = max(72, min(columns, 140))
@@ -739,6 +1198,10 @@ def render_dashboard(
     out.append(f"  Checked      : {now_local().strftime('%Y-%m-%d %H:%M:%S %Z')}")
     if RUNTIME_CAPABILITIES:
         out.append(f"  Runtime      : {clip(' | '.join(RUNTIME_CAPABILITIES), width - 18)}")
+    if os.environ.get("GLOBALPING_API_TOKEN"):
+        out.append("  Global probes: authenticated Globalping API token detected")
+    else:
+        out.append("  Global probes: anonymous public API budget; measurements are rate-limited")
     if last_success:
         out.append(f"  Last success : {last_success}")
     if last_page_update:
@@ -851,10 +1314,97 @@ def render_dashboard(
             latency = f"{probe.latency_ms:.0f} ms" if probe.latency_ms is not None else "n/a"
             label = f"    {probe.name:<12} {probe.state:<7} {latency:<9} {clip(probe.detail, width - 45)}"
             out.append(paint(label, status_color(probe.state), use_color))
-    for name in ("feed", "rest", "gateway", "cdn"):
+    for name in ("feed", "rest", "gateway", "cdn", "dns"):
         values = latencies.get(name)
         if values:
             out.append(f"      {name.upper():<8} {sparkline(values)}  {latency_summary(values)}")
+
+    out.append("")
+    out.append(paint("  HOST NETWORK TELEMETRY  (this computer only)", MAGENTA, use_color, True))
+    if local_rates:
+        out.append(
+            f"    RX {local_rates['rx_mbps']:.3f} Mbps / {local_rates['rx_pps']:.1f} pkt/s"
+            f"    TX {local_rates['tx_mbps']:.3f} Mbps / {local_rates['tx_pps']:.1f} pkt/s"
+        )
+        out.append(f"    Interface errors: {local_rates['errors']:.0f} delta  |  drops: {local_rates['drops']:.0f} delta")
+    else:
+        out.append("    Host counters unavailable (psutil not installed/accessible yet).")
+
+    out.append("")
+    out.append(paint("  WORLDWIDE REMOTE TELEMETRY  (Globalping community probes)", MAGENTA, use_color, True))
+    if global_limits:
+        remaining = global_limits.get("remaining")
+        limit = global_limits.get("limit")
+        reset = global_limits.get("reset_seconds")
+        quota = (f"{remaining:.0f}/{limit:.0f} measurements remaining in current window" 
+                 if isinstance(remaining, (int, float)) and isinstance(limit, (int, float))
+                 else "provider quota available")
+        reset_text = f"; window resets in {reset:.0f}s" if isinstance(reset, (int, float)) else ""
+        out.append(f"    Globalping API quota: {quota} ({global_limits.get('type', 'unknown')}){reset_text}")
+        credits = global_limits.get("credits_remaining")
+        if isinstance(credits, (int, float)):
+            out.append(f"    Account credits remaining: {credits:.0f}")
+    elif global_limits_error:
+        out.append(paint(f"    Globalping quota lookup unavailable: {clip(global_limits_error, width - 45)}", YELLOW, use_color))
+    else:
+        out.append("    Globalping provider quota: waiting for first lookup.")
+    if global_telemetry:
+        for kind in ("ping", "http", "dns", "mtr"):
+            measurement = global_telemetry.get(kind)
+            if not measurement:
+                continue
+            summary = measurement.get("summary") if isinstance(measurement.get("summary"), dict) else {}
+            error = measurement.get("error")
+            if error:
+                out.append(paint(f"    {kind.upper():<8} ERROR: {clip(error, width - 18)}", RED, use_color))
+                continue
+            median = summary.get("median_ms")
+            median_text = f"{median:.1f} ms median" if isinstance(median, (int, float)) else "latency n/a"
+            probes_n = measurement.get("probes_count", 0)
+            target = measurement.get("target", "")
+            state = "UP" if summary.get("up", 0) else "WARN"
+            if summary.get("down", 0):
+                state = "WARN"
+            line_text = f"    {kind.upper():<8} {state:<5} {median_text:<19} probes={probes_n:<3} target={target}"
+            out.append(paint(line_text, status_color(state), use_color))
+            if kind == "http" and measurement.get("rows"):
+                http_rows = [r for r in measurement["rows"] if isinstance(r, dict)]
+                for field, label in (("dns_ms", "DNS"), ("tcp_ms", "TCP"), ("tls_ms", "TLS"), ("ttfb_ms", "TTFB")):
+                    samples = [r.get(field) for r in http_rows if isinstance(r.get(field), (int, float))]
+                    if samples:
+                        out.append(f"      {label} median: {statistics.median(samples):.1f} ms")
+            if kind == "ping" and measurement.get("rows"):
+                by_continent: dict[str, list[float]] = {}
+                for item in measurement["rows"]:
+                    if isinstance(item, dict) and isinstance(item.get("latency_ms"), (int, float)):
+                        by_continent.setdefault(str(item.get("continent") or "?"), []).append(float(item["latency_ms"]))
+                if by_continent:
+                    regional = "  |  ".join(
+                        f"{continent}: p50 {statistics.median(samples):.1f} ms (n={len(samples)})"
+                        for continent, samples in sorted(by_continent.items())
+                    )
+                    out.append(f"      Regional p50: {clip(regional, width - 20)}")
+                ranked = sorted(
+                    [r for r in measurement["rows"] if isinstance(r, dict)],
+                    key=lambda r: (r.get("latency_ms") is None, r.get("latency_ms") or 0),
+                )
+                for row in ranked[:min(8, len(ranked))]:
+                    ms = row.get("latency_ms")
+                    loss = row.get("loss_pct")
+                    ms_text = f"{ms:.1f} ms" if isinstance(ms, (int, float)) else "timeout"
+                    loss_text = f"{loss:.0f}% loss" if isinstance(loss, (int, float)) else "loss n/a"
+                    location = f"{row.get('city', '?')}, {row.get('country', '?')}"
+                    out.append(f"      {clip(location, 24):<24} {ms_text:<12} {loss_text:<12} {clip(row.get('network', ''), 26)}")
+            if kind == "mtr" and measurement.get("rows"):
+                traced = next((r for r in measurement["rows"] if r.get("hops")), None)
+                if traced:
+                    out.append(f"      Route from {traced.get('location', 'remote probe')}:")
+                    for index, hop in enumerate(traced.get("hops", [])[:8], start=1):
+                        hop_ms = hop.get("avg_ms")
+                        hop_text = f"{hop_ms:.2f} ms" if isinstance(hop_ms, (int, float)) else "*"
+                        out.append(f"        {index:>2}. {clip(hop.get('address', '*'), 24):<24} {hop_text}")
+    else:
+        out.append("    Waiting for the first scheduled worldwide probe measurement.")
 
     out.append("")
     out.append(paint("  RECENT STATUS CHANGES", CYAN, use_color, True))
@@ -866,12 +1416,15 @@ def render_dashboard(
 
     out.append("")
     out.append(paint(rule, DIM, use_color))
-    out.append(paint("  Ctrl+C to stop  |  Refresh uses Discord's public status feed  |  No token required", DIM, use_color))
+    out.append(paint("  Ctrl+C to stop  |  Discord status page + Globalping remote probes  |  Optional Globalping token raises limits", DIM, use_color))
     print("\n".join(out), flush=True)
 
 
 def output_json(payload: Optional[dict[str, Any]], official_latency: Optional[float],
-                probes: list[ProbeResult], error: Optional[str]) -> None:
+                probes: list[ProbeResult], error: Optional[str],
+                global_telemetry: Optional[dict[str, dict[str, Any]]] = None,
+                local_rates: Optional[dict[str, float]] = None,
+                global_limits: Optional[dict[str, Any]] = None) -> None:
     result = {
         "checked_at": iso_now(),
         "source": STATUS_PAGE,
@@ -882,6 +1435,10 @@ def output_json(payload: Optional[dict[str, Any]], official_latency: Optional[fl
             for p in probes
         ],
         "error": error,
+        "worldwide_telemetry": global_telemetry or {},
+        "globalping_api_limits": global_limits,
+        "local_host_network_rates": local_rates,
+        "measurement_vantage_note": "Globalping rows are measurements from remote volunteer probes; local_probes and host rates are from this computer.",
     }
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -909,9 +1466,12 @@ def main() -> int:
     data_dir = args.data_dir or state_directory()
     state_path = data_dir / "last_state.json"
     event_path = data_dir / "events.jsonl"
+    telemetry_path = data_dir / "worldwide_telemetry.jsonl"
 
     if args.history:
         return show_history(event_path)
+    if args.telemetry_history:
+        return show_telemetry_history(telemetry_path)
 
     bootstrap_optional_dependencies(args, data_dir)
     use_color = color_enabled(args.no_color)
@@ -932,7 +1492,21 @@ def main() -> int:
         "rest": deque(maxlen=24),
         "gateway": deque(maxlen=24),
         "cdn": deque(maxlen=24),
+        "dns": deque(maxlen=24),
     }
+    global_telemetry: dict[str, dict[str, Any]] = {}
+    host_previous = local_network_counters()
+    host_rates: Optional[dict[str, float]] = None
+    started_at = time.monotonic()
+    next_global_due = started_at
+    next_http_due = started_at + 60.0
+    next_dns_due = started_at + 120.0
+    next_trace_due = started_at + 180.0
+    global_limits: Optional[dict[str, Any]] = None
+    global_limits_error: Optional[str] = None
+    next_limits_due = started_at
+    if args.trace_now:
+        next_trace_due = started_at
 
     try:
         while True:
@@ -989,7 +1563,7 @@ def main() -> int:
                         last_probes = probe_future.result()
                         probe_changes = []
                         for probe in last_probes:
-                            key = {"REST API": "rest", "Gateway WS": "gateway", "Media CDN": "cdn"}.get(probe.name)
+                            key = {"REST API": "rest", "Gateway WS": "gateway", "Media CDN": "cdn", "Local DNS": "dns"}.get(probe.name)
                             if key and probe.latency_ms is not None:
                                 latency_history[key].append(probe.latency_ms)
                             old_probe_state = previous_probe_states.get(probe.name)
@@ -1009,8 +1583,72 @@ def main() -> int:
                 else:
                     last_probes = []
 
+            host_current = local_network_counters()
+            host_rates = calculate_local_network_rates(host_previous, host_current)
+            if host_current:
+                host_previous = host_current
+
+            if not args.no_globalping:
+                now_mono = time.monotonic()
+                if now_mono >= next_limits_due:
+                    try:
+                        global_limits = fetch_globalping_limits(args)
+                        global_limits_error = None
+                    except MonitorError as exc:
+                        global_limits_error = str(exc)
+                    next_limits_due = now_mono + 900.0
+                due_jobs: list[tuple[str, float]] = []
+                if now_mono >= next_global_due:
+                    due_jobs.append(("ping", args.global_interval))
+                    next_global_due = now_mono + args.global_interval
+                if now_mono >= next_http_due:
+                    due_jobs.append(("http", args.http_interval))
+                    next_http_due = now_mono + args.http_interval
+                if now_mono >= next_dns_due:
+                    due_jobs.append(("dns", args.dns_interval))
+                    next_dns_due = now_mono + args.dns_interval
+                if now_mono >= next_trace_due:
+                    due_jobs.append(("mtr", args.trace_interval))
+                    next_trace_due = now_mono + args.trace_interval
+
+                for test_type, _period in due_jobs:
+                    print(f"[global telemetry] Running worldwide {test_type.upper()} measurement ...", file=sys.stderr)
+                    measurement = run_global_telemetry(test_type, args)
+                    global_telemetry[test_type] = measurement
+                    if not args.no_save and not measurement.get("error"):
+                        append_telemetry_log(telemetry_path, measurement)
+                    telemetry_events: list[str] = []
+                    if measurement.get("error"):
+                        msg = f"Globalping {test_type} measurement failed: {measurement['error']}"
+                        telemetry_events.append(msg)
+                        if notifications_enabled:
+                            send_desktop_notification("Worldwide telemetry measurement failed", msg)
+                    else:
+                        summary = measurement.get("summary", {})
+                        if test_type == "ping" and summary.get("probe_results", 0) >= 4:
+                            loss = summary.get("median_loss_pct")
+                            failed = summary.get("warn", 0) + summary.get("down", 0)
+                            count = summary.get("probe_results", 0)
+                            # This reports a distributed symptom; it does not declare a Discord outage.
+                            if failed / max(1, count) >= 0.5:
+                                msg = f"Globalping symptom: {failed}/{count} worldwide probes reported missing/failed ICMP replies to {measurement.get('target')}"
+                                telemetry_events.append(msg)
+                                if notifications_enabled:
+                                    send_desktop_notification("Discord global network telemetry warning", msg)
+                            elif isinstance(loss, (int, float)) and loss >= 25:
+                                msg = f"Globalping median packet loss to gateway.discord.gg: {loss:.0f}%"
+                                telemetry_events.append(msg)
+                    if telemetry_events:
+                        stamp = now_local().strftime("%H:%M:%S")
+                        for event in telemetry_events:
+                            events.append((stamp, event))
+                        if not args.no_save:
+                            append_event_log(event_path, telemetry_events)
+                    if args.beep and sys.stdout.isatty() and telemetry_events:
+                        print("\a", end="", flush=True)
+
             if args.json:
-                output_json(last_payload, last_latency, last_probes, last_error)
+                output_json(last_payload, last_latency, last_probes, last_error, global_telemetry, host_rates, global_limits)
                 return 1 if last_error else 0
 
             if not args.no_clear and sys.stdout.isatty() and use_color:
@@ -1026,6 +1664,10 @@ def main() -> int:
                 latency_history,
                 use_color,
                 stale=bool(last_error and last_payload is not None),
+                global_telemetry=global_telemetry,
+                local_rates=host_rates,
+                global_limits=global_limits,
+                global_limits_error=global_limits_error,
             )
 
             if args.once:
