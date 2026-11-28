@@ -1,0 +1,34 @@
+Discord Global Status Monitor 3.2.1 - historical build notes
+
+ARCHIVE NOTICE
+--------------
+This document is retained only as a historical record from the 3.2.1 source
+snapshot. It is not valid build or validation evidence for DGSM 3.4.4 or later.
+
+Python source: discord_server_global_status.py
+Linux Python zipapp: dist/linux/DiscordGlobalStatusMonitor.pyz
+Optional Linux C ABI: dist/linux/discord_global_status.so
+
+Linux C ABI build environment at that historical point:
+  OS: Linux x86_64
+  CPython: 3.13.5
+  OpenSSL: 3.5.5
+  C compiler: system cc / CFFI embedding backend
+
+The .so linked to libpython3.13.so.1.0 and was not a standalone executable.
+The Windows EXE and DLL were not prebuilt in that historical Linux environment.
+
+Historical validation:
+  14 offline unit tests passed.
+  Python compilation passed.
+  Python zipapp --version/help passed.
+  Linux C ABI library loaded through ctypes and exported version 3.2.1.
+  Live Discord/Globalping endpoints were not reachable during that build
+  because the build environment had DNS resolution failures.
+
+For current information, see:
+  README.md
+  Discord_Global_Status_Monitor_BUILD_INFO.txt
+  RELEASE_VALIDATION.txt
+  docs/CODEBASE_GUIDE.md
+  docs/RELEASE_ENGINEERING.md

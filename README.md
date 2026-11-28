@@ -135,9 +135,10 @@ Windows outputs are under `dist\windows\`: `exe\DiscordGlobalStatusMonitor.exe`,
 ## GitHub Actions
 
 `.github/workflows/ci.yml` runs the offline regression suite on Windows and
-Linux using Python 3.12, 3.13 and 3.15. It also builds the Linux zipapp/C ABI library
-and Windows EXE/DLL as CI artifacts. Windows CI artifacts are unsigned; the
-local `BUILD_AND_SIGN_WINDOWS.bat` performs the development signing flow.
+Linux using CPython 3.11, 3.12, 3.13, 3.14 and 3.15. It also builds the Linux
+zipapp/C ABI library and Windows EXE/DLL as CI artifacts. Both native CI build
+jobs skip signing; run the target-host signing flow before describing an artifact
+as signed.
 
 The workflow uses the current major releases of the official checkout,
 setup-python, and upload-artifact actions. <https://github.com/actions/setup-python>
@@ -148,6 +149,12 @@ setup-python, and upload-artifact actions. <https://github.com/actions/setup-pyt
 python3 -m unittest -v test_discord_server_global_status.py
 python3 -m py_compile discord_server_global_status.py backends/ripe_atlas.py discord_monitor_dll_build.py
 ```
+
+## Developer documentation
+
+- [Annotated codebase guide](docs/CODEBASE_GUIDE.md) — module responsibilities, runtime flow, data-vantage model, persistence, native ABI, and extension rules.
+- [Release engineering and CI](docs/RELEASE_ENGINEERING.md) — platform build gates, signing/trust distinctions, CI matrix, and versioned release checklist.
+- [Historical 3.2.1 build record](docs/archive/BUILD_INFO-v3.2.1.txt) — retained for provenance; not current build validation.
 
 ## Repository layout
 
