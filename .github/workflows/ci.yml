@@ -27,16 +27,36 @@ jobs:
       - name: Compile Python modules
         run: >-
           python -m py_compile discord_server_global_status.py
-          backends/ripe_atlas.py discord_monitor_dll_build.py
-          embed_windows_resources.py
+          backends/http_transport.py backends/ripe_atlas.py
+          discord_monitor_dll_build.py embed_windows_resources.py
       - name: Run offline regression suite
         run: python -m unittest -v test_discord_server_global_status.py
       - name: Build Python wheel
         run: python -m pip wheel --no-deps --wheel-dir wheelhouse .
 
+  security-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pip-audit from PyPI
+        run: >-
+          python -m pip install --disable-pip-version-check --no-input
+          --only-binary=:all: --index-url https://pypi.org/simple pip-audit
+      - name: Audit build and optional runtime dependencies
+        run: >-
+          pip-audit --strict
+          -r requirements-build.txt
+          -r requirements-optional.txt
+
   linux-build:
     name: Build Linux zipapp and C ABI library
-    needs: tests
+    needs: [tests, security-audit]
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
@@ -54,7 +74,7 @@ jobs:
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DGSM-Linux-x64
+          name: DGSM-Linux-x64-unsigned-CI
           path: |
             dist/linux/DiscordGlobalStatusMonitor.pyz
             dist/linux/discord_global_status.so
@@ -64,12 +84,12 @@ jobs:
             dist/linux/backends/*.py
             dist/linux/discord_server_global_status.py
             dist/linux/LICENSE
-            dist/linux/Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt
+            dist/linux/Discord_Global_Status_Monitor_v3.4.5_RELEASE_NOTES.txt
           if-no-files-found: error
 
   windows-build:
-    name: Build Windows EXE and DLL (unsigned CI artifacts)
-    needs: tests
+    name: Build and development-sign Windows EXE and DLL
+    needs: [tests, security-audit]
     runs-on: windows-latest
     steps:
       - name: Check out source
@@ -92,13 +112,13 @@ jobs:
             }
             Write-Host "PowerShell syntax: PASS - $script"
           }
-      - name: Build native Windows artifacts
+      - name: Build, development-sign, and verify Windows artifacts
         shell: powershell
-        run: .\build_windows.ps1 -NoToolchainInstall -SkipSigning
-      - name: Upload Windows artifacts
+        run: .\build_windows.ps1 -NoToolchainInstall
+      - name: Upload Windows development-signed artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: DGSM-Windows-x64-unsigned-CI
+          name: DGSM-Windows-x64-development-signed-CI
           path: |
             dist/windows/exe/DiscordGlobalStatusMonitor.exe
             dist/windows/dll/discord_global_status.dll
@@ -108,4 +128,6 @@ jobs:
             dist/windows/dll/backends/*.py
             dist/windows/DiscordGlobalStatusMonitor-Windows-x64.zip
             dist/windows/DiscordGlobalStatusMonitor-Windows-x64.zip.sha256
+            dist/windows/signing/signing-report.txt
+            dist/windows/signing/DGSM-Development-CodeSigning.cer
           if-no-files-found: error
