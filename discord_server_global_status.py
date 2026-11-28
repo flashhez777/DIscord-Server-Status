@@ -2100,9 +2100,28 @@ def render_dashboard(
                         out.append(f"      {label} median: {statistics.median(samples):.1f} ms")
             if kind == "dns" and measurement.get("rows"):
                 for dns_row in measurement["rows"][:5]:
-                    answers = dns_row.get("answers") if isinstance(dns_row, dict) else None
-                    if answers:
-                        out.append(f"      {clip(dns_row.get('location', 'remote probe'), 25):<25} {', '.join(answers[:4])}")
+                    if not isinstance(dns_row, dict):
+                        continue
+                    answers = dns_row.get("answers")
+                    answers = answers if isinstance(answers, list) else []
+                    answer_text = ", ".join(clip(answer, 64) for answer in answers[:8])
+                    if len(answers) > 8:
+                        answer_text += f", +{len(answers) - 8} more"
+                    if not answer_text:
+                        answer_text = clip(dns_row.get("detail", "no DNS answer"), 100)
+                    state = clip(dns_row.get("state", "WARN"), 8)
+                    out.append(
+                        f"      {clip(dns_row.get('location', 'remote probe'), 25):<25} "
+                        f"{clip(answer_text, 120)} [{state}]"
+                    )
+                if len(measurement.get("rows", [])) > 1:
+                    if summary.get("answer_set_consistent") is True:
+                        note = "same DNS answer set across probes (TTL cache ages may differ)"
+                    elif summary.get("answer_set_consistent") is False:
+                        note = "DNS answer sets vary by resolver/location; inspect regional results"
+                    else:
+                        note = "DNS answer-set comparison unavailable"
+                    out.append(f"      RRset comparison: {note}")
             if kind == "ping" and measurement.get("rows"):
                 by_continent: dict[str, list[float]] = {}
                 for item in measurement["rows"]:
