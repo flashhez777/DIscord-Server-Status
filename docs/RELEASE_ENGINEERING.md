@@ -28,7 +28,7 @@ The test matrix contains ten OS/Python combinations (two operating systems multi
 The Windows workflow runs:
 
 ```powershell
-.\\build_windows.ps1 -NoToolchainInstall -SkipSigning
+.\build_windows.ps1 -NoToolchainInstall -SkipSigning
 ```
 
 The uploaded artifact is therefore named `DGSM-Windows-x64-unsigned-CI`. It is a useful native build output, not a publicly signed release. The Linux CI build also sets `DGSM_SKIP_SIGNING=1`. Never describe either CI artifact as CA-signed.
@@ -44,15 +44,15 @@ BUILD_AND_SIGN_WINDOWS.bat
 Equivalent PowerShell entry:
 
 ```powershell
-.\\build_windows.ps1
+.\build_windows.ps1
 ```
 
 The script currently supports x64 CPython 3.11–3.15. It prefers a compatible installed runtime, creates an isolated build virtual environment, discovers/installs the required Microsoft native toolchain, generates version metadata from the canonical version, and builds:
 
-- `dist\\windows\\exe\\DiscordGlobalStatusMonitor.exe` — one-file console executable with a bundled Python runtime.
-- `dist\\windows\\dll\\discord_global_status.dll` — Python-backed C ABI library with the companion source/backend package.
-- `dist\\windows\\DiscordGlobalStatusMonitor-Windows-x64.zip` and its SHA-256 sidecar.
-- `dist\\windows\\signing\\signing-report.txt` and timestamped logs under `.build\\windows\\logs\\`.
+- `dist\windows\exe\DiscordGlobalStatusMonitor.exe` — one-file console executable with a bundled Python runtime.
+- `dist\windows\dll\discord_global_status.dll` — Python-backed C ABI library with the companion source/backend package.
+- `dist\windows\DiscordGlobalStatusMonitor-Windows-x64.zip` and its SHA-256 sidecar.
+- `dist\windows\signing\signing-report.txt` and timestamped logs under `.build\windows\logs\`.
 
 The DLL must use a compatible CPython minor runtime and its companion source/backend files. It is not an alternative standalone EXE.
 
