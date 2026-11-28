@@ -32,7 +32,7 @@ The Windows CI workflow runs the default signing path:
 .\build_windows.ps1 -NoToolchainInstall
 ```
 
-It creates and verifies a local self-signed development certificate, then includes the public certificate and signing report with the EXE, DLL and ZIP. The artifact is named `DGSM-Windows-x64-development-signed-CI`. This is a valid local development signature, not a publicly trusted publisher identity or SmartScreen reputation. The Linux CI job sets `DGSM_SKIP_SIGNING=1`; the tag-triggered release workflow signs the Linux files with a temporary development key and includes its public certificate and detached signatures.
+It creates and verifies a local self-signed development certificate, then includes the public certificate and signing report with the EXE, DLL and ZIP. The artifact is named `DGSM-Windows-x64-development-signed-CI`. This is a valid local development signature, not a publicly trusted publisher identity or SmartScreen reputation. The Linux CI job sets `DGSM_SKIP_SIGNING=1`; the versioned release workflow signs the Linux files with a temporary development key and includes its public certificate and detached signatures.
 
 ## 3. Windows developer build
 
@@ -114,13 +114,18 @@ Before publishing a versioned GitHub Release:
 An annotated Git tag can be created from the checked-out release commit with:
 
 ```bash
+# Option A: publish from the dedicated version branch after merge.
+git switch -c release/v3.4.5
+git push origin release/v3.4.5
+
+# Option B: publish from an annotated version tag.
 git tag -a v3.4.5 -m "DGSM 3.4.5"
 git push origin v3.4.5
 
-The push triggers `.github/workflows/release.yml`. It verifies the tag/version,
-audits dependencies, rebuilds Windows/Linux artifacts, and creates a GitHub
-Release with the ZIPs, standalone binaries, checksums, signing reports and
-release notes. Set protected repository secrets `DGSM_PFX_BASE64` and
+Either verified ref triggers `.github/workflows/release.yml`. It audits
+dependencies, rebuilds Windows/Linux artifacts, and creates a GitHub Release
+with the ZIPs, standalone binaries, checksums, signing reports and release
+notes. Set protected repository secrets `DGSM_PFX_BASE64` and
 `DGSM_PFX_PASSWORD` to sign Windows binaries with a CA-issued publisher PFX;
 without them, Windows uses a self-signed development certificate.
 ```
