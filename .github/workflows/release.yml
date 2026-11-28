@@ -2,20 +2,18 @@ name: DGSM Versioned Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
-    branches:
-      - 'release/v*.*.*'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   verify-source:
-    name: Verify tagged source and dependencies
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/v')
+    name: Verify versioned release ref and dependencies
     runs-on: ubuntu-latest
     steps:
-      - name: Check out tagged source
+      - name: Check out versioned release source
         uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
