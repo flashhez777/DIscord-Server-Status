@@ -1271,14 +1271,14 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         avg = numeric(stats.get("avg"))
         loss = numeric(stats.get("loss"))
         row: dict[str, Any] = {
-            "continent": str(probe.get("continent") or "?"),
-            "region": str(probe.get("region") or ""),
-            "country": str(probe.get("country") or "?"),
-            "city": str(probe.get("city") or "Unknown"),
-            "location": loc or str(probe.get("country") or "Unknown"),
-            "network": str(probe.get("network") or "unknown network"),
-            "asn": str(probe.get("asn") or ""),
-            "status": str(result.get("status") or "unknown"),
+            "continent": clip(probe.get("continent") or "?", 40),
+            "region": clip(probe.get("region") or "", 48),
+            "country": clip(probe.get("country") or "?", 40),
+            "city": clip(probe.get("city") or "Unknown", 72),
+            "location": clip(loc or probe.get("country") or "Unknown", 96),
+            "network": clip(probe.get("network") or "unknown network", 96),
+            "asn": clip(probe.get("asn") or "", 32),
+            "status": clip(result.get("status") or "unknown", 40),
             "latency_ms": avg,
             "min_ms": numeric(stats.get("min")),
             "max_ms": numeric(stats.get("max")),
@@ -1317,38 +1317,68 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
                 all_rtts.append(dns_time)
             raw_status_code = result.get("statusCode")
             status_name = result.get("statusCodeName")
-            # Globalping uses numeric DNS RCODE 0 for NOERROR. Do not use
-            # truthiness here: zero is a valid success code, not missing data.
-            status_text = str(
-                status_name if status_name not in (None, "")
-                else raw_status_code if raw_status_code is not None
-                else "unknown"
-            ).strip()
-            answers = result.get("answers") if isinstance(result.get("answers"), list) else []
-            answer_texts: list[str] = []
-            for answer in answers[:8]:
-                if isinstance(answer, dict):
-                    answer_name = str(answer.get("name") or "")
-                    answer_type = str(answer.get("type") or "")
-                    answer_value = str(answer.get("value") or "")
-                    answer_ttl = answer.get("ttl")
-                    parts = [part for part in (answer_name, answer_type, answer_value) if part]
-                    rendered = " ".join(parts) or json.dumps(answer, ensure_ascii=False, sort_keys=True)
-                    if isinstance(answer_ttl, (int, float)):
-                        rendered += f" (TTL {int(answer_ttl)})"
-                    answer_texts.append(clip(rendered, 100))
-                else:
-                    answer_texts.append(clip(answer, 100))
-            successful_rcode = status_text.casefold() in {"noerror", "0", "success"}
-            numeric_rcode = numeric(raw_status_code)
-            if numeric_rcode == 0:
-                successful_rcode = True
+            if numeric_rcode is not None and numeric_rcode.is_integer():
+                status_text = DNS_RCODE_NAMES.get(
+                    int(numeric_rcode), clip(raw_status_name or str(int(numeric_rcode)), 32).upper()
+                )
+            elif raw_status_name not in (None, ""):
+                status_text = clip(raw_status_name, 32).upper()
+            elif raw_status_code not in (None, ""):
+                status_text = clip(raw_status_code, 32).upper()
+            else:
+                status_text = "UNKNOWN"
+
+            dns_answers = normalize_dns_answers(result.get("answers"), target)
+            row.update(dns_answers)
+            successful_rcode = numeric_rcode == 0 or status_text in {"NOERROR", "SUCCESS"}
+            resolver_responded = (
+                numeric_rcode is not None
+                or raw_status_name not in (None, "")
+                or raw_status_code not in (None, "")
+            )
+            resolver_error = clip(result.get("error"), 240) if result.get("error") else ""
+            answer_count = dns_answers["answer_count"]
+
+            if resolver_error:
+                answer_state = "ERROR"
+            elif not resolver_responded:
+                answer_state = "UNKNOWN"
+            elif successful_rcode and answer_count:
+                answer_state = "RESOLVED"
+            elif successful_rcode:
+                answer_state = "NODATA"
+            else:
+                answer_state = status_text
+
             row["dns_status"] = status_text
-            row["answers"] = answer_texts
-            # NOERROR/NODATA is a valid DNS response even when the requested
-            # RRset is empty; resolver success and answer presence are distinct.
-            row["state"] = "UP" if successful_rcode else "WARN"
-            row["detail"] = f"DNS {status_text}; {len(answer_texts)} answer(s)"
+            row["resolver_responded"] = bool(resolver_responded)
+            row["dns_answer_state"] = answer_state
+            row["dns_error"] = resolver_error or None
+
+            # NOERROR confirms the resolver answered; it does not confirm that
+            # the requested gateway A RRset contains usable addresses.
+            if resolver_error or status_text == "SERVFAIL":
+                row["state"] = "DOWN"
+            elif not successful_rcode or answer_count == 0 or not dns_answers["validation_ok"]:
+                row["state"] = "WARN"
+            else:
+                row["state"] = "UP"
+
+            if resolver_error:
+                detail = f"DNS resolver error: {resolver_error}"
+            elif successful_rcode and answer_count == 0:
+                detail = f"DNS {status_text}/NODATA; resolver responded; 0 answer(s)"
+            else:
+                detail = f"DNS {status_text}; {answer_count} answer(s)"
+            if dns_answers["ttl_conflicts"]:
+                detail += "; inconsistent TTLs within an RRset"
+            if dns_answers["missing_ttls"]:
+                detail += f"; {dns_answers['missing_ttls']} record(s) missing a valid TTL"
+            if dns_answers["invalid_records"]:
+                detail += f"; {dns_answers['invalid_records']} malformed record(s) ignored"
+            if dns_answers["answers_truncated"]:
+                detail += "; answer list truncated at the safety limit"
+            row["detail"] = clip(detail, 320)
         elif test_type in {"mtr", "traceroute"}:
             hops = result.get("hops") if isinstance(result.get("hops"), list) else []
             hop_summaries = []
@@ -1358,8 +1388,8 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
                 hop_stats = hop.get("stats") if isinstance(hop.get("stats"), dict) else {}
                 hop_avg = numeric(hop_stats.get("avg"))
                 hop_summaries.append({
-                    "address": str(hop.get("resolvedAddress") or "*"),
-                    "hostname": str(hop.get("resolvedHostname") or ""),
+                    "address": clip(hop.get("resolvedAddress") or "*", 96),
+                    "hostname": clip(hop.get("resolvedHostname") or "", 128),
                     "avg_ms": hop_avg,
                     "loss_pct": numeric(hop_stats.get("loss")),
                     "asn": hop.get("asn") or [],
@@ -1390,14 +1420,24 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         "warn": sum(1 for row in rows if row.get("state") == "WARN"),
         "down": sum(1 for row in rows if row.get("state") == "DOWN"),
     }
+    if test_type == "dns":
+        signatures = {tuple(row.get("answer_set", [])) for row in rows}
+        summary.update({
+            "resolver_responses": sum(1 for row in rows if row.get("resolver_responded")),
+            "resolved": sum(1 for row in rows if row.get("dns_answer_state") == "RESOLVED"),
+            "nodata": sum(1 for row in rows if row.get("dns_answer_state") == "NODATA"),
+            "unique_answer_sets": len(signatures),
+            "answer_set_consistent": len(signatures) <= 1,
+        })
     return {
-        "type": test_type,
-        "target": target,
-        "status": str(data.get("status") or "unknown"),
-        "measurement_id": str(data.get("_measurement_id") or data.get("id") or ""),
+        "type": clip(test_type, 24),
+        "target": clip(target, 255),
+        "status": clip(data.get("status") or "unknown", 40),
+        "measurement_id": clip(data.get("_measurement_id") or data.get("id") or "", 128),
         "completed_at": iso_now(),
         "elapsed_ms": numeric(data.get("_elapsed_ms")),
-        "probes_count": int(data.get("probesCount") or len(rows)),
+        "probes_count": len(rows),
+        "results_truncated": results_truncated,
         "rows": rows,
         "summary": summary,
     }
