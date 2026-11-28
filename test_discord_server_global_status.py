@@ -137,6 +137,7 @@ class TLSAndNetworkTests(unittest.TestCase):
             with self.assertRaisesRegex(monitor.MonitorError, "Retry-After=60"):
                 monitor.globalping_request("GET", "https://api.globalping.io/v1/limits", 2)
         self.assertEqual(urlopen.call_count, 1)
+        self.assertTrue(error.fp.closed)
 
     def test_version_comparison_recognizes_stale_ca_bundle(self):
         minimum = monitor._version_tuple("2026.11.20")
