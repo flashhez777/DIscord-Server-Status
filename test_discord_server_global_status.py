@@ -129,6 +129,17 @@ class TLSAndNetworkTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_optional_runtime_installation_is_opt_in(self):
+        with mock.patch("sys.argv", ["dgsm", "--no-globalping", "--no-probes"]):
+            args = monitor.parse_args()
+        self.assertFalse(args.auto_install)
+        self.assertTrue(args.no_auto_install)
+
+        with mock.patch("sys.argv", ["dgsm", "--auto-install", "--no-globalping", "--no-probes"]):
+            opted_in = monitor.parse_args()
+        self.assertTrue(opted_in.auto_install)
+        self.assertFalse(opted_in.no_auto_install)
+
     def test_ripe_atlas_measurement_ids_are_read_from_environment(self):
         with mock.patch.dict("os.environ", {"RIPE_ATLAS_MEASUREMENT_IDS": "12345,67890"}, clear=True), \
              mock.patch("sys.argv", ["dgsm", "--no-globalping", "--no-probes"]):
