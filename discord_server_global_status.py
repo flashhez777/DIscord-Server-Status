@@ -1252,7 +1252,7 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
         "missing_ttls": missing_ttls,
         "invalid_records": invalid_records,
         "answers_truncated": truncated,
-        "validation_ok": ttl_conflicts == 0 and invalid_records == 0 and not truncated,
+        "validation_ok": (ttl_conflicts == 0 and missing_ttls == 0 and invalid_records == 0 and not truncated),
     }
 
 
