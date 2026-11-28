@@ -138,11 +138,18 @@ Windows outputs are under `dist\windows\`: `exe\DiscordGlobalStatusMonitor.exe`,
 
 ## GitHub Actions
 
-`.github/workflows/ci.yml` runs the offline regression suite on Windows and
-Linux using CPython 3.11, 3.12, 3.13, 3.14 and 3.15. It also builds the Linux
-zipapp/C ABI library and Windows EXE/DLL as CI artifacts. Both native CI build
-jobs skip signing; run the target-host signing flow before describing an artifact
-as signed.
+`.github/workflows/ci.yml` runs the offline regression suite on Windows and Linux
+using CPython 3.11-3.15, runs pip-audit over build and optional runtime
+dependencies, builds the Linux zipapp/C ABI library and builds/development-signs
+the Windows EXE/DLL. Windows CI uses an ephemeral self-signed certificate: it is
+not publicly trusted and does not provide SmartScreen reputation. Linux CI
+skips signing.
+
+The tag-triggered `.github/workflows/release.yml` workflow rebuilds target
+artifacts and publishes a GitHub Release with ZIPs, binaries, checksums,
+signing reports and release notes. Configure the protected `DGSM_PFX_BASE64`
+and `DGSM_PFX_PASSWORD` secrets to use a CA-issued Windows publisher
+certificate; without them, Windows uses the self-signed development certificate.
 
 The workflow uses the current major releases of the official checkout,
 setup-python, and upload-artifact actions. <https://github.com/actions/setup-python>
