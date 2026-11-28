@@ -179,17 +179,97 @@ function Get-DevelopmentCertificate {
     } | Sort-Object NotAfter -Descending | Select-Object -First 1
 
     if (-not $certificate) {
-        Write-Host 'Creating reusable user-scoped local code-signing certificate...' -ForegroundColor Yellow
-        $certificate = New-SelfSignedCertificate `
-            -Subject $subject `
-            -Type CodeSigningCert `
-            -CertStoreLocation 'Cert:\CurrentUser\My' `
-            -KeyAlgorithm RSA `
-            -KeyLength 3072 `
-            -HashAlgorithm SHA256 `
-            -KeyExportPolicy NonExportable `
-            -NotAfter (Get-Date).AddYears(3)
+        Write-Host 'Creating reusable user-scoped local code-signing certificate with .NET/CryptoAPI...' -ForegroundColor Yellow
+
+        # Avoid New-SelfSignedCertificate here. On some hosted Windows images
+        # that cmdlet can block inside the certificate provider indefinitely.
+        # Generate the key with the .NET CryptoAPI RSA provider, create an
+        # explicit code-signing certificate, then persist its private key in
+        # the current user's certificate store via a short-lived in-memory PFX.
+        $rsa = $null
+        $selfSigned = $null
+        $imported = $null
+        $store = $null
+        $pfxBytes = $null
+        $temporaryPassword = ([Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N'))
+
+        try {
+            $rsa = New-Object -TypeName System.Security.Cryptography.RSACryptoServiceProvider -ArgumentList 3072
+            $rsa.PersistKeyInCsp = $false
+            if ($rsa.KeySize -ne 3072) {
+                throw "The cryptographic provider returned an unexpected RSA key size: $($rsa.KeySize)."
+            }
+
+            $request = [System.Security.Cryptography.X509Certificates.CertificateRequest]::new(
+                $subject,
+                $rsa,
+                [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                [System.Security.Cryptography.RSASignaturePadding]::Pkcs1
+            )
+
+            $basicConstraints = [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension]::new(
+                $false, $false, 0, $true
+            )
+            $keyUsage = [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension]::new(
+                [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::DigitalSignature,
+                $true
+            )
+            $ekuOids = New-Object System.Security.Cryptography.OidCollection
+            [void]$ekuOids.Add([System.Security.Cryptography.Oid]::new('1.3.6.1.5.5.7.3.3', 'Code Signing'))
+            $enhancedKeyUsage = [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension]::new(
+                $ekuOids, $false
+            )
+            $subjectKeyIdentifier = [System.Security.Cryptography.X509Certificates.X509SubjectKeyIdentifierExtension]::new(
+                $request.PublicKey, $false
+            )
+
+            [void]$request.CertificateExtensions.Add($basicConstraints)
+            [void]$request.CertificateExtensions.Add($keyUsage)
+            [void]$request.CertificateExtensions.Add($enhancedKeyUsage)
+            [void]$request.CertificateExtensions.Add($subjectKeyIdentifier)
+
+            $notBefore = [DateTimeOffset]::UtcNow.AddMinutes(-5)
+            $notAfter = [DateTimeOffset]::UtcNow.AddYears(3)
+            $selfSigned = $request.CreateSelfSigned($notBefore, $notAfter)
+            $pfxBytes = $selfSigned.Export(
+                [System.Security.Cryptography.X509Certificates.X509ContentType]::Pfx,
+                $temporaryPassword
+            )
+
+            $keyStorageFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
+                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
+            $imported = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
+                $pfxBytes, $temporaryPassword, $keyStorageFlags
+            )
+
+            $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+                [System.Security.Cryptography.X509Certificates.StoreName]::My,
+                [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser
+            )
+            $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+            [void]$store.Add($imported)
+            $store.Close()
+
+            $createdThumbprint = $imported.Thumbprint
+        } catch {
+            throw "Could not create the local DGSM code-signing certificate with the .NET CryptoAPI provider: $($_.Exception.Message)"
+        } finally {
+            if ($store) {
+                try { $store.Close() } catch { }
+                $store.Dispose()
+            }
+            if ($imported) { $imported.Dispose() }
+            if ($selfSigned) { $selfSigned.Dispose() }
+            if ($rsa) { $rsa.Dispose() }
+            if ($pfxBytes) { [Array]::Clear($pfxBytes, 0, $pfxBytes.Length) }
+            $temporaryPassword = $null
+        }
+
+        $certificate = Get-ChildItem Cert:\CurrentUser\My | Where-Object {
+            $_.Thumbprint -eq $createdThumbprint -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date)
+        } | Select-Object -First 1
     }
+
     if (-not $certificate -or -not $certificate.HasPrivateKey) {
         throw 'Could not create or locate a usable local DGSM code-signing certificate.'
     }
