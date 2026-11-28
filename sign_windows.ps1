@@ -236,8 +236,7 @@ function Get-DevelopmentCertificate {
                 $temporaryPassword
             )
 
-            $keyStorageFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor
-                [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
+            $keyStorageFlags = [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::UserKeySet -bor [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::PersistKeySet
             $imported = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new(
                 $pfxBytes, $temporaryPassword, $keyStorageFlags
             )
