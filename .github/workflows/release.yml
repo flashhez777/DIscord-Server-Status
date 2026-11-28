@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*.*.*'
+    branches:
+      - 'release/v*.*.*'
 
 permissions:
   contents: write
@@ -23,12 +25,17 @@ jobs:
         shell: bash
         run: |
           version="$(python -c 'from dgsm_version import __version__; print(__version__)')"
-          expected="v${version}"
-          if [[ "${GITHUB_REF_NAME}" != "${expected}" ]]; then
-            echo "Tag ${GITHUB_REF_NAME} does not match canonical version ${expected}." >&2
+          expected_tag="v${version}"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            expected_ref="${expected_tag}"
+          else
+            expected_ref="release/${expected_tag}"
+          fi
+          if [[ "${GITHUB_REF_NAME}" != "${expected_ref}" ]]; then
+            echo "Ref ${GITHUB_REF_NAME} does not match canonical release ref ${expected_ref}." >&2
             exit 1
           fi
-          echo "Verified release tag ${GITHUB_REF_NAME}"
+          echo "Verified release ref ${GITHUB_REF_NAME} -> ${expected_tag}"
       - name: Install pip-audit from PyPI
         run: >-
           python -m pip install --disable-pip-version-check --no-input
@@ -76,6 +83,9 @@ jobs:
           $pfxPath = Join-Path $env:RUNNER_TEMP 'dgsm-publisher.pfx'
           try {
             if (-not [string]::IsNullOrWhiteSpace($env:DGSM_PFX_BASE64)) {
+              if ([string]::IsNullOrWhiteSpace($env:DGSM_PFX_PASSWORD)) {
+                throw 'DGSM_PFX_PASSWORD must be configured when DGSM_PFX_BASE64 is configured.'
+              }
               $bytes = [Convert]::FromBase64String($env:DGSM_PFX_BASE64)
               [IO.File]::WriteAllBytes($pfxPath, $bytes)
               $env:DGSM_PFX_PATH = $pfxPath
@@ -204,7 +214,7 @@ jobs:
             exit 1
           fi
           gh release create "${tag}" \
-            --verify-tag \
+            --target "${GITHUB_SHA}" \
             --title "DGSM ${version}" \
             --notes-file "Discord_Global_Status_Monitor_v${version}_RELEASE_NOTES.txt" \
             "${assets[@]}"
