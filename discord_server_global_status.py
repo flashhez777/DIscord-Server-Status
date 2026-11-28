@@ -1491,14 +1491,18 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
     }
     if test_type == "dns":
         resolved_rows = [row for row in rows if row.get("dns_answer_state") == "RESOLVED"]
+        validated_rows = [
+            row for row in resolved_rows if row.get("state") == "UP"
+        ]
         signatures = {tuple(row.get("answer_set", [])) for row in resolved_rows}
         summary.update({
             "resolver_responses": sum(1 for row in rows if row.get("resolver_responded")),
             "resolved": len(resolved_rows),
+            "validated": len(validated_rows),
             "nodata": sum(1 for row in rows if row.get("dns_answer_state") == "NODATA"),
             "unique_answer_sets": len(signatures),
             "answer_set_consistent": (
-                len(signatures) == 1 and len(resolved_rows) == len(rows)
+                len(signatures) == 1 and len(validated_rows) == len(rows)
                 if rows else None
             ),
         })
