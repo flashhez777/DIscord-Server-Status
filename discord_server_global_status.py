@@ -1196,6 +1196,16 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
                 invalid_records += 1
                 continue
 
+        if record_type == "CNAME":
+            cname_target = value.strip().lower().rstrip(".")
+            if (
+                not cname_target or len(cname_target) > 253
+                or any(ch.isspace() or ord(ch) < 33 for ch in cname_target)
+            ):
+                invalid_records += 1
+                continue
+            value = cname_target + "."
+
         ttl = _parse_dns_ttl(answer.get("ttl"))
         if ttl is None:
             missing_ttls += 1
@@ -1232,9 +1242,31 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
         identity_text = f"{record['name']} {record['type']} {record['value']}"
         answer_set.append(identity_text)
         rendered_answers.append(identity_text + (f" (TTL {ttl})" if ttl is not None else ""))
-        if record["type"] in {"A", "AAAA"}:
-            address_answers.append(record["value"])
         all_ttls.extend(ttl_values)
+
+    # Count A/AAAA records only when they belong to the queried owner name or
+    # to a CNAME target reachable from it. Unrelated records in the answer
+    # section must not make an unsuccessful gateway lookup appear healthy.
+    query_name = fallback_target.strip().lower().rstrip(".") + "."
+    reachable_names = {query_name}
+    for _ in range(16):
+        previous_count = len(reachable_names)
+        for record in normalized_records:
+            if record["type"] == "CNAME" and record["name"] in reachable_names:
+                reachable_names.add(record["value"])
+        if len(reachable_names) == previous_count:
+            break
+
+    all_address_records = [
+        record for record in normalized_records if record["type"] in {"A", "AAAA"}
+    ]
+    address_answers = sorted({
+        record["value"] for record in all_address_records
+        if record["name"] in reachable_names
+    })
+    unrelated_address_answers = sum(
+        1 for record in all_address_records if record["name"] not in reachable_names
+    )
 
     ttl_conflicts = sum(1 for values in rrset_ttls.values() if len(values) > 1)
     ttl_values = sorted(all_ttls)
@@ -1242,8 +1274,9 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
         "answer_records": normalized_records,
         "answers": rendered_answers,
         "answer_set": answer_set,
-        "address_answers": sorted(set(address_answers)),
-        "address_answer_count": len(set(address_answers)),
+        "address_answers": address_answers,
+        "address_answer_count": len(address_answers),
+        "unrelated_address_answers": unrelated_address_answers,
         "answer_count": len(normalized_records),
         "ttl_min": min(ttl_values) if ttl_values else None,
         "ttl_max": max(ttl_values) if ttl_values else None,
@@ -1252,7 +1285,10 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
         "missing_ttls": missing_ttls,
         "invalid_records": invalid_records,
         "answers_truncated": truncated,
-        "validation_ok": (ttl_conflicts == 0 and missing_ttls == 0 and invalid_records == 0 and not truncated),
+        "validation_ok": (
+            ttl_conflicts == 0 and missing_ttls == 0
+            and invalid_records == 0 and not truncated
+        ),
     }
 
 
