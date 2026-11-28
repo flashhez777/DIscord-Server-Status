@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for Discord Global Status Monitor 3.4.4."""
+"""Offline unit tests for Discord Global Status Monitor 3.4.5."""
 
 import io
 import json
@@ -277,7 +277,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(normalized["rows"][0]["dns_answer_state"], "NODATA")
         self.assertEqual(
             normalized["rows"][0]["detail"],
-            "DNS NOERROR/NODATA; resolver responded; 0 answer(s)",
+            "DNS NOERROR/NODATA; resolver responded; 0 record(s), 0 A/AAAA address answer(s)",
         )
 
     def test_globalping_dns_nxdomain_remains_warning(self):
