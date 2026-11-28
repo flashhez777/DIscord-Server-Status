@@ -2191,7 +2191,7 @@ def output_json(payload: Optional[dict[str, Any]], official_latency: Optional[fl
         "tls_verification": "enabled",
         "tls_trust_sources": list(_TLS_CA_SOURCES),
     }
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def show_history(path: Path) -> int:
