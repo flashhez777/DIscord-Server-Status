@@ -1,4 +1,4 @@
-# Discord Global Status Monitor (DGSM) 3.4.4
+# Discord Global Status Monitor (DGSM) 3.4.5
 
 Cross-platform worldwide monitor for Discord's **public, global service health**. It does not monitor individual guilds, Discord accounts, or private bot state.
 
@@ -20,8 +20,10 @@ python -m pip install .
 dgsm --help
 ```
 
-Optional telemetry libraries are installed into a private runtime directory
-when the monitor starts. The project itself has no mandatory third-party
+Optional telemetry libraries are detected when already installed. Runtime
+installation is disabled by default; use --auto-install to explicitly fetch
+optional integration packages from HTTPS PyPI as binary wheels, or install
+requirements-optional.txt yourself. The project has no mandatory third-party
 runtime dependency.
 
 ## Quick start
@@ -41,7 +43,7 @@ python3 --version
 python3 discord_server_global_status.py
 ```
 
-Optional packages are installed into a private application state directory. No root privileges are required for ordinary monitoring.
+Optional packages are not downloaded on startup by default. Use --auto-install to opt in to PyPI binary-wheel installation; ordinary monitoring works with standard-library fallbacks and needs no root privileges.
 
 ## Global telemetry backends
 
@@ -126,6 +128,8 @@ Windows outputs are under `dist\windows\`: `exe\DiscordGlobalStatusMonitor.exe`,
 ## Security and interpretation
 
 - TLS certificate and hostname verification remain enabled. Do not solve certificate errors by disabling verification.
+- HTTPS requests are restricted to the documented Discord/Globalping/RIPE API hosts. Redirects must stay on the same HTTPS origin.
+- Globalping DNS answers are compared as sorted RRsets. TTL differences describe resolver cache age and are not, by themselves, evidence of different DNS answers. NOERROR with no A/AAAA address answer is reported as NODATA/WARN.
 - Never commit `GLOBALPING_API_TOKEN` or `RIPE_ATLAS_API_KEY` to GitHub.
 - Globalping and RIPE Atlas probe results are measurements from third-party networks. They do not expose Discord's private data-center telemetry.
 - A failed ping can be caused by ICMP filtering. Correlate it with HTTP, DNS, TLS, Gateway, and Discord's official status feed before interpreting it as an outage.
@@ -147,13 +151,14 @@ setup-python, and upload-artifact actions. <https://github.com/actions/setup-pyt
 
 ```bash
 python3 -m unittest -v test_discord_server_global_status.py
-python3 -m py_compile discord_server_global_status.py backends/ripe_atlas.py discord_monitor_dll_build.py
+python3 -m py_compile discord_server_global_status.py backends/http_transport.py backends/ripe_atlas.py discord_monitor_dll_build.py
 ```
 
 ## Developer documentation
 
 - [Annotated codebase guide](docs/CODEBASE_GUIDE.md) — module responsibilities, runtime flow, data-vantage model, persistence, native ABI, and extension rules.
 - [Release engineering and CI](docs/RELEASE_ENGINEERING.md) — platform build gates, signing/trust distinctions, CI matrix, and versioned release checklist.
+- [Security and release checklist](docs/SECURITY_AND_RELEASE_CHECKLIST.md) — DNS, redirect, credential, state-file, automated test, signing and publication gates.
 - [Historical 3.2.1 build record](docs/archive/BUILD_INFO-v3.2.1.txt) — retained for provenance; not current build validation.
 
 ## Repository layout
