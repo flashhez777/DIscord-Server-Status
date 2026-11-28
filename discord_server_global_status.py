@@ -1377,7 +1377,8 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
             if dns_time is not None:
                 all_rtts.append(dns_time)
             raw_status_code = result.get("statusCode")
-            status_name = result.get("statusCodeName")
+            raw_status_name = result.get("statusCodeName")
+            numeric_rcode = numeric(raw_status_code)
             if numeric_rcode is not None and numeric_rcode.is_integer():
                 status_text = DNS_RCODE_NAMES.get(
                     int(numeric_rcode), clip(raw_status_name or str(int(numeric_rcode)), 32).upper()
