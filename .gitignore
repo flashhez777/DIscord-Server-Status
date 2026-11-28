@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local state
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.local
+*.log
+
+# Build outputs and caches
+.build/
+dist/
+*.spec
+*.tmp
+*.bak
+
+# Private signing material / credentials
+*.pfx
+*.p12
+*.key
+*.private.pem
+*_PRIVATE_KEY*
+secrets/
+
+# OS / IDE noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

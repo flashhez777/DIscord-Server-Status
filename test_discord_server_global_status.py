@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for Discord Global Status Monitor 3.4.1."""
+"""Offline unit tests for Discord Global Status Monitor 3.4.4."""
 
 import io
 import json
@@ -83,6 +83,15 @@ class TLSAndNetworkTests(unittest.TestCase):
         self.assertGreaterEqual(elapsed, 0)
         self.assertIs(urlopen.call_args.kwargs["context"], monitor.tls_context())
 
+    def test_statuspage_response_size_is_bounded(self):
+        monitor.initialize_tls_context()
+        oversized = {"padding": "x" * (2 * 1024 * 1024)}
+        with mock.patch.object(
+            monitor.urllib.request, "urlopen", return_value=FakeResponse(oversized)
+        ):
+            with self.assertRaisesRegex(monitor.MonitorError, "exceeded the 2 MiB response safety limit"):
+                monitor.request_json("https://unit.test/status", 2)
+
     def test_globalping_get_retries_transient_network_failure(self):
         monitor.initialize_tls_context()
         payload = {"ok": True}
@@ -120,6 +129,81 @@ class TLSAndNetworkTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_ripe_atlas_measurement_ids_are_read_from_environment(self):
+        with mock.patch.dict("os.environ", {"RIPE_ATLAS_MEASUREMENT_IDS": "12345,67890"}, clear=True), \
+             mock.patch("sys.argv", ["dgsm", "--no-globalping", "--no-probes"]):
+            args = monitor.parse_args()
+        self.assertEqual(args.ripe_atlas_ids, "12345,67890")
+        self.assertEqual(args.ripe_atlas_interval, 900)
+
+    def test_ripe_atlas_can_be_disabled_explicitly(self):
+        with mock.patch.dict("os.environ", {"RIPE_ATLAS_MEASUREMENT_IDS": "12345"}, clear=True), \
+             mock.patch("sys.argv", ["dgsm", "--no-ripe-atlas"]):
+            args = monitor.parse_args()
+        self.assertEqual(args.ripe_atlas_ids, "")
+
+    def test_ripe_atlas_parser_rejects_invalid_ids_and_short_intervals(self):
+        with mock.patch("sys.argv", ["dgsm", "--ripe-atlas-ids", "abc"]):
+            with self.assertRaises(SystemExit):
+                monitor.parse_args()
+        with mock.patch("sys.argv", ["dgsm", "--ripe-atlas-interval", "60"]):
+            with self.assertRaises(SystemExit):
+                monitor.parse_args()
+
+    def test_ripe_atlas_runner_only_passes_configured_key_to_read_only_backend(self):
+        args = monitor.argparse.Namespace(
+            ripe_atlas_ids="12345", ripe_atlas_api_key_env="DGSM_TEST_ATLAS_KEY", timeout=4
+        )
+        with mock.patch.dict("os.environ", {"DGSM_TEST_ATLAS_KEY": "secret-value"}, clear=True), \
+             mock.patch("backends.ripe_atlas.collect", return_value={"status": "ok"}) as collect, \
+             mock.patch.object(monitor, "tls_context", return_value="verified-context"):
+            result = monitor.run_ripe_atlas(args)
+        self.assertEqual(result["status"], "ok")
+        collect.assert_called_once_with("12345", 4, "verified-context", "secret-value")
+
+    def test_main_json_once_executes_configured_ripe_atlas_collection(self):
+        payload = {
+            "page": {"updated_at": "2026-11-28T00:00:00Z"},
+            "status": {"indicator": "none", "description": "All Systems Operational"},
+            "components": [],
+            "incidents": [],
+            "scheduled_maintenances": [],
+        }
+        atlas = {
+            "type": "ripe_atlas",
+            "status": "ok",
+            "provider": "RIPE Atlas public probe network",
+            "vantage": "remote RIPE Atlas probes; not Discord-internal telemetry",
+            "rows": [],
+            "summary": {"probe_results": 0, "successful_samples": 0, "up": 0, "warn": 0, "down": 0},
+            "probes_count": 0,
+            "target": "gateway.discord.gg",
+            "completed_at": "2026-11-28T00:00:00+00:00",
+        }
+        captured = {}
+
+        def capture_json(*args, **kwargs):
+            captured["telemetry"] = args[4]
+
+        with tempfile.TemporaryDirectory() as temp_dir, \
+             mock.patch("sys.argv", [
+                 "dgsm", "--json", "--no-globalping", "--no-probes",
+                 "--no-notifications", "--no-auto-install", "--no-save",
+                 "--ripe-atlas-ids", "12345", "--data-dir", temp_dir,
+             ]), \
+             mock.patch.object(monitor, "bootstrap_optional_dependencies"), \
+             mock.patch.object(monitor, "initialize_tls_context"), \
+             mock.patch.object(monitor, "fetch_official_summary", return_value=(payload, 1.0)), \
+             mock.patch.object(monitor, "local_network_counters", return_value=None), \
+             mock.patch.object(monitor, "run_ripe_atlas", return_value=atlas) as run_atlas, \
+             mock.patch.object(monitor, "output_json", side_effect=capture_json):
+            exit_code = monitor.main()
+
+        self.assertEqual(exit_code, 0)
+        run_atlas.assert_called_once()
+        self.assertIn("ripe_atlas", captured["telemetry"])
+        self.assertEqual(captured["telemetry"]["ripe_atlas"]["status"], "ok")
+
     def test_percentile_interpolation(self):
         self.assertAlmostEqual(monitor.percentile([0, 10, 20, 30], 50), 15)
         self.assertEqual(monitor.percentile([], 95), None)
@@ -161,6 +245,43 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(row["http_status"], 200)
         self.assertEqual(row["tls_ms"], 20)
         self.assertEqual(normalized["summary"]["median_ms"], 50)
+
+    def test_globalping_dns_numeric_zero_is_success_and_answers_are_structured(self):
+        data = {
+            "status": "finished",
+            "probesCount": 1,
+            "results": [{
+                "probe": {"continent": "Europe", "country": "SK", "city": "Bratislava"},
+                "result": {
+                    "status": "finished",
+                    "statusCode": 0,
+                    "statusCodeName": "NOERROR",
+                    "timings": {"total": 8.5},
+                    "answers": [{"name": "gateway.discord.gg.", "type": "A", "ttl": 60, "value": "162.159.135.232"}],
+                },
+            }],
+        }
+        normalized = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)
+        row = normalized["rows"][0]
+        self.assertEqual(row["state"], "UP")
+        self.assertEqual(row["dns_status"], "NOERROR")
+        self.assertEqual(row["answers"], ["gateway.discord.gg. A 162.159.135.232 (TTL 60)"])
+        self.assertEqual(normalized["summary"]["up"], 1)
+
+    def test_globalping_dns_noerror_without_answers_is_not_mislabeled_as_transport_failure(self):
+        data = {
+            "results": [{"probe": {}, "result": {"statusCode": 0, "statusCodeName": "NOERROR", "answers": []}}]
+        }
+        normalized = monitor.normalize_globalping_result("dns", "example.invalid", data)
+        self.assertEqual(normalized["rows"][0]["state"], "UP")
+        self.assertEqual(normalized["rows"][0]["detail"], "DNS NOERROR; 0 answer(s)")
+
+    def test_globalping_dns_nxdomain_remains_warning(self):
+        data = {
+            "results": [{"probe": {}, "result": {"statusCode": 3, "statusCodeName": "NXDOMAIN", "answers": []}}]
+        }
+        normalized = monitor.normalize_globalping_result("dns", "missing.discord.example", data)
+        self.assertEqual(normalized["rows"][0]["state"], "WARN")
 
     def test_bad_component_position_does_not_crash(self):
         groups, standalone = monitor.component_groups([
@@ -467,6 +588,7 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
         script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
         self.assertIn("--version-file", script)
         self.assertIn("--resource-file", script)
+        self.assertIn("embed_windows_resources.py", script)
         self.assertIn("dll_smoke_test.py", script)
         self.assertIn("$Artifacts = @($ExePath, $DllPath)", script)
         self.assertIn("Discord Global Status Monitor.lnk", script)
@@ -475,11 +597,13 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
     def test_native_dll_builder_accepts_and_links_resource_file(self):
         builder = Path(__file__).with_name("discord_monitor_dll_build.py").read_text(encoding="utf-8")
         self.assertIn('"--resource-file"', builder)
-        self.assertIn("extra_link_args=extra_link_args", builder)
+        self.assertIn("extra_objects=extra_objects", builder)
         self.assertIn("from dgsm_version import __version__", builder)
 
     def test_dll_rc_template_uses_self_contained_numeric_windows_constants(self):
         rc = (Path(__file__).parent / "assets" / "DGSM.rc").read_text(encoding="utf-8")
+        self.assertRegex(rc, r"(?m)^\s*1\s+VERSIONINFO\b")
+        self.assertNotRegex(rc, r"(?m)^\s*VS_VERSION_INFO\s+VERSIONINFO\b")
         self.assertRegex(rc, r"(?m)^\s*FILEOS\s+0x00040004L\s*$")
         self.assertRegex(rc, r"(?m)^\s*FILETYPE\s+0x00000002L\s*$")
         self.assertNotRegex(rc, r"\bVOS_NT_WINDOWS32\b|\bVFT_DLL\b")
@@ -496,9 +620,9 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
         root = Path(__file__).parent
         version = (root / "dgsm_version.py").read_text(encoding="utf-8")
         project = (root / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('__version__ = "3.4.1"', version)
-        self.assertIn('__version_info__ = (3, 4, 1)', version)
-        self.assertIn('version = "3.4.1"', project)
+        self.assertIn('__version__ = "3.4.4"', version)
+        self.assertIn('__version_info__ = (3, 4, 4)', version)
+        self.assertIn('version = "3.4.4"', project)
         self.assertIn("@DGSM_VERSION_TUPLE@", (root / "assets" / "version_info.txt").read_text(encoding="utf-8"))
         self.assertIn("@DGSM_VERSION_COMMA4@", (root / "assets" / "DGSM.rc").read_text(encoding="utf-8"))
 

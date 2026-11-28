@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "discord-global-status-monitor"
-version = "3.4.1"
+version = "3.4.4"
 description = "Cross-platform worldwide Discord public service health and network telemetry monitor"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "Proprietary - add your chosen open-source license before public distribution" }
+license = { text = "GPL-3.0-only" }
 authors = [{ name = "DGSM contributors" }]
 dependencies = []
 
@@ -22,5 +22,5 @@ build = ["pyinstaller>=6.21", "cffi>=2.1.1", "setuptools>=75", "wheel>=0.44"]
 test = []
 
 [tool.setuptools]
-py-modules = ["discord_server_global_status", "discord_monitor_dll_build", "dgsm_version"]
+py-modules = ["discord_server_global_status", "discord_monitor_dll_build", "embed_windows_resources", "dgsm_version"]
 packages = ["backends"]

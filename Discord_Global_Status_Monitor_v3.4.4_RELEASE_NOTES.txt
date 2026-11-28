@@ -1,0 +1,43 @@
+DGSM 3.4.4 RELEASE NOTES
+========================
+
+TELEMETRY CORRECTNESS
+---------------------
+- Fix Globalping DNS RCODE handling: numeric statusCode 0 is NOERROR, not a
+  missing/unknown value. DNS answers are rendered from their structured name,
+  type, value and TTL fields. NOERROR/NODATA is kept distinct from DNS errors.
+- Connect the existing read-only RIPE Atlas backend to the main monitor.
+  Configure RIPE_ATLAS_MEASUREMENT_IDS or --ripe-atlas-ids; Atlas runs every
+  15 minutes by default and can be disabled with --no-ripe-atlas.
+- Keep Atlas collection on a separate worker so it cannot starve Globalping's
+  scheduled jobs. API keys are read only from the configured environment
+  variable and are never included in telemetry, dashboard or JSON output.
+- Atlas partial failures and recovery are surfaced as separate telemetry events.
+- One-shot/JSON Atlas timeouts now produce an explicit provider error record
+  rather than silently omitting the optional provider from the JSON snapshot.
+
+RELIABILITY AND DISTRIBUTION
+----------------------------
+- Bound the official Discord Statuspage response at 2 MiB and report an
+  explicit size-limit error rather than parsing a silently truncated body.
+- Align package metadata with the repository's GPL-3.0-only LICENSE.
+- Include LICENSE and release notes in Windows and Linux source build outputs.
+- Preserve the 3.4.3 Windows DLL resource correction: RT_VERSION must use
+  numeric resource ID 1, and the resource embedder validates that identity.
+- Add a deterministic post-link UpdateResourceW pass before DLL version
+  verification and Authenticode signing.
+
+SCOPE
+-----
+- No guild, user-account, or private bot monitoring has been introduced.
+- Discord Statuspage remains the authoritative service-health feed. Globalping
+  and RIPE Atlas remain independent remote network vantage points, not
+  Discord-internal telemetry.
+
+VERIFICATION
+------------
+- Offline regression tests cover DNS RCODE 0, NODATA, NXDOMAIN, Atlas CLI
+  wiring, API-key handling, JSON one-shot collection, response-size boundaries,
+  numeric RT_VERSION identity and resource-update ordering.
+- Linux/Windows native compilation and Authenticode signing must be run on
+  their respective supported hosts before declaring a platform release.

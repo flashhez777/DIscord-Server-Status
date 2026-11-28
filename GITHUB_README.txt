@@ -1,4 +1,4 @@
-DISCORD GLOBAL STATUS MONITOR (DGSM) 3.4.1
+DISCORD GLOBAL STATUS MONITOR (DGSM) 3.4.4
 ==========================================
 
 Cross-platform CLI for Discord worldwide public service health and global
@@ -9,7 +9,7 @@ FEATURES
 * Official Discord Statuspage global incidents, components and maintenance.
 * Local REST API, Gateway, CDN, DNS, TLS and host network telemetry.
 * Globalping worldwide probes: ping, HTTP, DNS and MTR.
-* Optional read-only RIPE Atlas existing-measurement backend.
+* Integrated read-only RIPE Atlas existing-measurement backend (15-minute default refresh).
 * RTT median/p95, packet loss, DNS/TLS/HTTP breakdown and history.
 * Verified TLS; OS CA roots, certifi and optional extra PEM trust bundle.
 
@@ -27,7 +27,8 @@ The builder:
   5. Installs/checks MSVC x64, Windows SDK resource compiler and SignTool
      directly from Microsoft-signed installers. WinGet is optional.
   6. Creates a private virtual environment and installs build dependencies.
-  7. Compiles EXE and CFFI DLL, embeds the DGSM network icon and signs them.
+  7. Compiles EXE and CFFI DLL, embeds the DGSM network icon and verifies
+     numeric RT_VERSION resource ID 1 using UpdateResourceW before signing.
   8. Verifies signatures, writes SHA256 hashes and packages the release.
 
 The builder never sends `install` or `list` to a legacy `py.exe`. It captures
@@ -55,6 +56,6 @@ not publicly trusted. Public release signing needs a trusted code-signing CA.
 TESTS
 -----
 python -m unittest -v test_discord_server_global_status.py
-python -m py_compile discord_server_global_status.py backends/ripe_atlas.py discord_monitor_dll_build.py
+python -m py_compile discord_server_global_status.py backends/ripe_atlas.py discord_monitor_dll_build.py embed_windows_resources.py
 
 See README.md, BACKENDS.txt, SECURITY.md and BUILD_TROUBLESHOOTING.txt.

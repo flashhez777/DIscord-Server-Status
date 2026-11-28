@@ -216,6 +216,14 @@ def parse_args() -> argparse.Namespace:
                         help="Run a worldwide MTR route trace immediately at startup.")
     parser.add_argument("--globalping-token-env", default="GLOBALPING_API_TOKEN",
                         help="Environment variable containing an optional Globalping bearer token.")
+    parser.add_argument("--ripe-atlas-ids", default=os.environ.get("RIPE_ATLAS_MEASUREMENT_IDS", ""),
+                        help="Comma-separated existing RIPE Atlas measurement IDs (read-only; defaults to RIPE_ATLAS_MEASUREMENT_IDS).")
+    parser.add_argument("--ripe-atlas-interval", type=float, default=900,
+                        help="RIPE Atlas latest-results refresh interval in seconds (minimum 300).")
+    parser.add_argument("--ripe-atlas-api-key-env", default="RIPE_ATLAS_API_KEY",
+                        help="Environment variable containing an optional RIPE Atlas API key; the key is never printed.")
+    parser.add_argument("--no-ripe-atlas", action="store_true",
+                        help="Disable optional RIPE Atlas measurements even when measurement IDs are configured.")
     parser.add_argument("--telemetry-history", action="store_true",
                         help="Display saved worldwide telemetry samples and exit.")
     parser.add_argument("--doctor", action="store_true",
@@ -230,6 +238,20 @@ def parse_args() -> argparse.Namespace:
         parser.error("--interval must be at least 10 seconds to avoid excessive polling")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
+    if args.ripe_atlas_interval < 300:
+        parser.error("--ripe-atlas-interval must be at least 300 seconds")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.ripe_atlas_api_key_env):
+        parser.error("--ripe-atlas-api-key-env must be a valid environment-variable name")
+    if args.no_ripe_atlas:
+        args.ripe_atlas_ids = ""
+    else:
+        from backends.ripe_atlas import BackendError as RipeAtlasError, parse_measurement_ids
+        try:
+            args.ripe_atlas_ids = ",".join(
+                str(value) for value in parse_measurement_ids(args.ripe_atlas_ids)
+            )
+        except RipeAtlasError as exc:
+            parser.error(str(exc))
     if not 1 <= args.global_probes <= 50:
         parser.error("--global-probes must be between 1 and 50")
     if not 1 <= args.trace_probes <= 10:
@@ -596,7 +618,9 @@ def request_json(url: str, timeout: float) -> tuple[dict[str, Any], float]:
             code = getattr(response, "status", 200)
             if code != 200:
                 raise MonitorError(f"HTTP {code}")
-            raw = response.read(2 * 1024 * 1024)
+            raw = response.read(2 * 1024 * 1024 + 1)
+            if len(raw) > 2 * 1024 * 1024:
+                raise MonitorError("Discord Statuspage summary exceeded the 2 MiB response safety limit")
     except urllib.error.HTTPError as exc:
         retry_after = exc.headers.get("Retry-After") if exc.headers else None
         suffix = f"; Retry-After: {retry_after}s" if retry_after else ""
@@ -1069,11 +1093,40 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
             row["latency_ms"] = dns_time
             if dns_time is not None:
                 all_rtts.append(dns_time)
-            status_code = str(result.get("statusCode") or "unknown")
+            raw_status_code = result.get("statusCode")
+            status_name = result.get("statusCodeName")
+            # Globalping uses numeric DNS RCODE 0 for NOERROR. Do not use
+            # truthiness here: zero is a valid success code, not missing data.
+            status_text = str(
+                status_name if status_name not in (None, "")
+                else raw_status_code if raw_status_code is not None
+                else "unknown"
+            ).strip()
             answers = result.get("answers") if isinstance(result.get("answers"), list) else []
-            row["state"] = "UP" if answers and status_code.lower() in {"noerror", "0", "success"} else "WARN"
-            row["answers"] = [clip(answer, 100) for answer in answers[:8]]
-            row["detail"] = f"DNS {status_code}; {len(answers)} answer(s)"
+            answer_texts: list[str] = []
+            for answer in answers[:8]:
+                if isinstance(answer, dict):
+                    answer_name = str(answer.get("name") or "")
+                    answer_type = str(answer.get("type") or "")
+                    answer_value = str(answer.get("value") or "")
+                    answer_ttl = answer.get("ttl")
+                    parts = [part for part in (answer_name, answer_type, answer_value) if part]
+                    rendered = " ".join(parts) or json.dumps(answer, ensure_ascii=False, sort_keys=True)
+                    if isinstance(answer_ttl, (int, float)):
+                        rendered += f" (TTL {int(answer_ttl)})"
+                    answer_texts.append(clip(rendered, 100))
+                else:
+                    answer_texts.append(clip(answer, 100))
+            successful_rcode = status_text.casefold() in {"noerror", "0", "success"}
+            numeric_rcode = numeric(raw_status_code)
+            if numeric_rcode == 0:
+                successful_rcode = True
+            row["dns_status"] = status_text
+            row["answers"] = answer_texts
+            # NOERROR/NODATA is a valid DNS response even when the requested
+            # RRset is empty; resolver success and answer presence are distinct.
+            row["state"] = "UP" if successful_rcode else "WARN"
+            row["detail"] = f"DNS {status_text}; {len(answer_texts)} answer(s)"
         elif test_type in {"mtr", "traceroute"}:
             hops = result.get("hops") if isinstance(result.get("hops"), list) else []
             hop_summaries = []
@@ -1126,6 +1179,14 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         "rows": rows,
         "summary": summary,
     }
+
+
+def run_ripe_atlas(args: argparse.Namespace) -> dict[str, Any]:
+    """Read operator-selected existing Atlas measurements; never create tests."""
+    from backends.ripe_atlas import collect
+
+    api_key = os.environ.get(args.ripe_atlas_api_key_env) or None
+    return collect(args.ripe_atlas_ids, args.timeout, tls_context(), api_key)
 
 
 def run_global_telemetry(test_type: str, args: argparse.Namespace) -> dict[str, Any]:
@@ -1658,7 +1719,7 @@ def render_dashboard(
         out.append("    Host counters unavailable (psutil not installed/accessible yet).")
 
     out.append("")
-    out.append(paint("  WORLDWIDE REMOTE TELEMETRY  (Globalping community probes)", MAGENTA, use_color, True))
+    out.append(paint("  WORLDWIDE REMOTE TELEMETRY  (Globalping + optional RIPE Atlas)", MAGENTA, use_color, True))
     if global_limits:
         remaining = global_limits.get("remaining")
         limit = global_limits.get("limit")
@@ -1676,7 +1737,7 @@ def render_dashboard(
     else:
         out.append("    Globalping provider quota: waiting for first lookup.")
     if global_telemetry:
-        for kind in ("ping", "http", "dns", "cdn", "mtr"):
+        for kind in ("ping", "http", "dns", "cdn", "mtr", "ripe_atlas"):
             measurement = global_telemetry.get(kind)
             if not measurement:
                 continue
@@ -1693,10 +1754,23 @@ def render_dashboard(
             probes_n = measurement.get("probes_count", 0)
             target = measurement.get("target", "")
             state = "UP" if summary.get("up", 0) else "WARN"
-            if summary.get("down", 0):
+            if summary.get("warn", 0) or summary.get("down", 0) or measurement.get("status") == "partial":
                 state = "WARN"
-            line_text = f"    {kind.upper():<8} {state:<5} {median_text:<19} probes={probes_n:<3} target={target}"
+            line_text = f"    {kind.upper():<10} {state:<5} {median_text:<19} probes={probes_n:<3} target={target}"
             out.append(paint(line_text, status_color(state), use_color))
+            if kind == "ripe_atlas":
+                out.append("      Existing RIPE Atlas measurements; remote volunteer probes, not Discord-internal telemetry.")
+                for atlas_row in measurement.get("rows", [])[:5]:
+                    if not isinstance(atlas_row, dict):
+                        continue
+                    latency = atlas_row.get("latency_ms")
+                    latency_text = f"{latency:.1f} ms" if isinstance(latency, (int, float)) else "latency n/a"
+                    loss = atlas_row.get("loss_pct")
+                    loss_text = f"{loss:.0f}% loss" if isinstance(loss, (int, float)) else "loss n/a"
+                    out.append(
+                        f"      Probe {clip(atlas_row.get('probe_id', '?'), 10):<10} "
+                        f"{latency_text:<13} {loss_text:<12} {clip(atlas_row.get('target', ''), 30)}"
+                    )
             if kind in {"http", "cdn"} and measurement.get("rows"):
                 http_rows = [r for r in measurement["rows"] if isinstance(r, dict)]
                 for field, label in (("dns_ms", "DNS"), ("tcp_ms", "TCP"), ("tls_ms", "TLS"), ("ttfb_ms", "TTFB")):
@@ -1773,7 +1847,7 @@ def output_json(payload: Optional[dict[str, Any]], official_latency: Optional[fl
         "worldwide_telemetry": global_telemetry or {},
         "globalping_api_limits": global_limits,
         "local_host_network_rates": local_rates,
-        "measurement_vantage_note": "Globalping rows are measurements from remote volunteer probes; local_probes and host rates are from this computer.",
+        "measurement_vantage_note": "Globalping and RIPE Atlas rows are measurements from independent remote volunteer probes, not Discord-internal telemetry; local_probes and host rates are from this computer.",
         "tls_verification": "enabled",
         "tls_trust_sources": list(_TLS_CA_SOURCES),
     }
@@ -1857,6 +1931,13 @@ def main() -> int:
         max_workers=2, thread_name_prefix="globalping"
     )
     pending_global: dict[str, concurrent.futures.Future] = {}
+    ripe_atlas_executor = (
+        concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="ripe-atlas")
+        if args.ripe_atlas_ids else None
+    )
+    pending_ripe_atlas: Optional[concurrent.futures.Future] = None
+    next_ripe_atlas_due = started_at
+    previous_ripe_atlas_error: Optional[str] = None
 
     try:
         while True:
@@ -2053,6 +2134,76 @@ def main() -> int:
                     if args.beep and sys.stdout.isatty() and telemetry_events:
                         print("\a", end="", flush=True)
 
+            # RIPE Atlas is independent of Globalping and only runs when the
+            # operator supplied existing measurement IDs. It never creates tests.
+            if ripe_atlas_executor is not None:
+                now_mono = time.monotonic()
+                if pending_ripe_atlas is None and now_mono >= next_ripe_atlas_due:
+                    print("[RIPE Atlas] Queued read-only latest-results collection ...", file=sys.stderr)
+                    pending_ripe_atlas = ripe_atlas_executor.submit(run_ripe_atlas, args)
+                    next_ripe_atlas_due = now_mono + args.ripe_atlas_interval
+
+                if (args.once or args.json) and pending_ripe_atlas is not None:
+                    try:
+                        pending_ripe_atlas.result(timeout=max(30.0, args.timeout * 4.0))
+                    except concurrent.futures.TimeoutError:
+                        pending_ripe_atlas.cancel()
+                        global_telemetry["ripe_atlas"] = {
+                            "type": "ripe_atlas",
+                            "provider": "RIPE Atlas public probe network",
+                            "vantage": "remote RIPE Atlas probes; not Discord-internal telemetry",
+                            "status": "error",
+                            "rows": [],
+                            "summary": {},
+                            "error": f"Timed out waiting for RIPE Atlas results after {max(30.0, args.timeout * 4.0):.0f} seconds",
+                            "completed_at": iso_now(),
+                        }
+                        pending_ripe_atlas = None
+
+                if pending_ripe_atlas is not None and pending_ripe_atlas.done():
+                    try:
+                        atlas_measurement = pending_ripe_atlas.result()
+                    except Exception as exc:
+                        atlas_measurement = {
+                            "type": "ripe_atlas",
+                            "provider": "RIPE Atlas public probe network",
+                            "vantage": "remote RIPE Atlas probes; not Discord-internal telemetry",
+                            "status": "error",
+                            "rows": [],
+                            "summary": {},
+                            "error": str(exc),
+                            "completed_at": iso_now(),
+                        }
+                    pending_ripe_atlas = None
+                    global_telemetry["ripe_atlas"] = atlas_measurement
+                    if not args.no_save and not atlas_measurement.get("error"):
+                        append_telemetry_log(telemetry_path, atlas_measurement)
+                    atlas_error = str(atlas_measurement.get("error") or "")
+                    atlas_events: list[str] = []
+                    if atlas_error:
+                        if atlas_error != previous_ripe_atlas_error:
+                            atlas_events.append(f"RIPE Atlas collection failed: {atlas_error}")
+                        previous_ripe_atlas_error = atlas_error
+                    else:
+                        if previous_ripe_atlas_error:
+                            atlas_events.append("RIPE Atlas collection has recovered.")
+                        previous_ripe_atlas_error = None
+                        partial_errors = atlas_measurement.get("errors")
+                        if isinstance(partial_errors, list) and partial_errors:
+                            atlas_events.append(
+                                f"RIPE Atlas returned partial results: {len(partial_errors)} measurement(s) failed."
+                            )
+                    if atlas_events:
+                        stamp = now_local().strftime("%H:%M:%S")
+                        for event in atlas_events:
+                            events.append((stamp, event))
+                        if not args.no_save:
+                            append_event_log(event_path, atlas_events)
+                        if notifications_enabled:
+                            send_desktop_notification("RIPE Atlas telemetry update", "\n".join(atlas_events[:3]))
+                        if args.beep and sys.stdout.isatty():
+                            print("\a", end="", flush=True)
+
             if args.json:
                 output_json(last_payload, last_latency, last_probes, last_error, global_telemetry, host_rates, global_limits)
                 return 1 if last_error else 0
@@ -2087,6 +2238,8 @@ def main() -> int:
         return 2
     finally:
         global_executor.shutdown(wait=False, cancel_futures=True)
+        if ripe_atlas_executor is not None:
+            ripe_atlas_executor.shutdown(wait=False, cancel_futures=True)
 
 
 if __name__ == "__main__":

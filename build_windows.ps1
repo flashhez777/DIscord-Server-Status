@@ -607,8 +607,11 @@ $IconRcTemplate = Join-Path $Root 'assets\DGSM.rc'
 $VersionTemplateFile = Join-Path $Root 'assets\version_info.txt'
 $VersionModule = Join-Path $Root 'dgsm_version.py'
 $DllSmokeTest = Join-Path $Root 'dll_smoke_test.py'
+$ResourceEmbedder = Join-Path $Root 'embed_windows_resources.py'
+$LicenseFile = Join-Path $Root 'LICENSE'
+$ReleaseNotes = Join-Path $Root 'Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt'
 $BackendsDir = Join-Path $Root 'backends'
-foreach ($file in @($Source, $DllBuilder, $Header, $BuildRequirements, $IconPath, $IconPng, $IconRcTemplate, $VersionTemplateFile, $VersionModule, $DllSmokeTest)) {
+foreach ($file in @($Source, $DllBuilder, $Header, $BuildRequirements, $IconPath, $IconPng, $IconRcTemplate, $VersionTemplateFile, $VersionModule, $DllSmokeTest, $ResourceEmbedder, $LicenseFile, $ReleaseNotes)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required source file is missing: $file" }
 }
 if (-not (Test-Path -LiteralPath (Join-Path $BackendsDir '__init__.py') -PathType Leaf)) { throw "Required telemetry backend package is missing: $BackendsDir" }
@@ -643,6 +646,9 @@ if ($rcTemplate -notmatch '(?m)^\s*FILEOS\s+0x00040004L\s*$') {
 }
 if ($rcTemplate -notmatch '(?m)^\s*FILETYPE\s+0x00000002L\s*$') {
     throw 'DLL RC template must use FILETYPE 0x00000002L (VFT_DLL).'
+}
+if ($rcTemplate -notmatch '(?m)^\s*1\s+VERSIONINFO\b') {
+    throw 'DLL RC template must use numeric RT_VERSION resource ID 1 (1 VERSIONINFO).'
 }
 [IO.File]::WriteAllText($IconRc, $rcTemplate, ([System.Text.UTF8Encoding]::new($false)))
 Write-Host "Canonical DGSM version: $AppVersion" -ForegroundColor Green
@@ -781,6 +787,18 @@ if (-not (Test-Path -LiteralPath $DllPath -PathType Leaf)) {
     if ($foundDll) { $DllPath = $foundDll.FullName }
     else { throw 'CFFI compilation returned success but no DLL was produced.' }
 }
+# CFFI/setuptools may treat a .res input differently across Python/Distutils
+# versions. Apply the compiled resources through Win32 UpdateResourceW before
+# verification and signing so RT_VERSION, RT_ICON and RT_GROUP_ICON are present.
+Write-Step 'Applying and verifying native DLL icon/version resources'
+$resourceEmbedRun = Invoke-CapturedProcess -FilePath $VenvPython -Arguments @(
+    $ResourceEmbedder, '--dll', $DllPath, '--resource-file', $IconResource
+) -TimeoutSeconds 120
+if ($resourceEmbedRun.StdOut) { Write-Host $resourceEmbedRun.StdOut -ForegroundColor Green }
+if ($resourceEmbedRun.StdErr) { Write-Host $resourceEmbedRun.StdErr -ForegroundColor DarkYellow }
+if ($resourceEmbedRun.ExitCode -ne 0) {
+    throw "Win32 resource embedding failed (exit $($resourceEmbedRun.ExitCode)): $($resourceEmbedRun.StdErr)"
+}
 $dllVersionResource = (Get-Item -LiteralPath $DllPath).VersionInfo
 if ($dllVersionResource.ProductVersion -notlike "$AppVersion*" -or
     $dllVersionResource.FileDescription -notmatch 'Discord Global Status Monitor') {
@@ -871,6 +889,8 @@ $StageFiles = @(
     @{ Source = $IconPng; Name = 'DGSM-icon.png' },
     @{ Source = (Join-Path $Root 'GITHUB_README.txt'); Name = 'GITHUB_README.txt' },
     @{ Source = (Join-Path $Root 'README.md'); Name = 'README.md' },
+    @{ Source = $LicenseFile; Name = 'LICENSE' },
+    @{ Source = $ReleaseNotes; Name = 'RELEASE_NOTES.txt' },
     @{ Source = (Join-Path $Root '.env.example'); Name = '.env.example' },
     @{ Source = (Join-Path $Root 'BACKENDS.txt'); Name = 'BACKENDS.txt' },
     @{ Source = (Join-Path $Root 'CONTRIBUTING.md'); Name = 'CONTRIBUTING.md' },
@@ -924,7 +944,7 @@ Compress-Archive -Path (Join-Path $PackageStage '*') -DestinationPath $PackagePa
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipArchive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
 try {
-    $requiredEntries = @('DiscordGlobalStatusMonitor.exe', 'discord_global_status.dll', 'discord_global_status.h', 'discord_server_global_status.py', 'dgsm_version.py', 'README.md', 'SHA256SUMS.txt')
+    $requiredEntries = @('DiscordGlobalStatusMonitor.exe', 'discord_global_status.dll', 'discord_global_status.h', 'discord_server_global_status.py', 'dgsm_version.py', 'README.md', 'LICENSE', 'RELEASE_NOTES.txt', 'SHA256SUMS.txt')
     $zipNames = @($zipArchive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
     foreach ($requiredEntry in $requiredEntries) {
         if ($requiredEntry -notin $zipNames) { throw "Release ZIP is missing required file: $requiredEntry" }

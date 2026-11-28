@@ -1,4 +1,4 @@
-# Discord Global Status Monitor (DGSM) 3.4.1
+# Discord Global Status Monitor (DGSM) 3.4.4
 
 Cross-platform worldwide monitor for Discord's **public, global service health**. It does not monitor individual guilds, Discord accounts, or private bot state.
 
@@ -7,7 +7,7 @@ Cross-platform worldwide monitor for Discord's **public, global service health**
 - Official Discord Statuspage summary: global indicator, components, incidents, updates, and scheduled maintenance.
 - Local REST API, Gateway WebSocket handshake, Media CDN, DNS, TLS, and host-interface telemetry.
 - Globalping community probes for worldwide ICMP, HTTP, DNS, CDN timing, and MTR/traceroute measurements.
-- Optional read-only RIPE Atlas backend for existing public measurements selected by the operator; it uses the latest per-probe results endpoint with a bounded lookback rather than downloading full measurement history.
+- Integrated optional read-only RIPE Atlas measurements selected by the operator; results use the latest per-probe endpoint, a bounded lookback, a separate worker and a 15-minute default refresh. DGSM never creates Atlas measurements.
 - p50/p95 latency, packet loss, probe counts, HTTP timing breakdown, historical JSONL samples, and event notifications.
 - Verified TLS with OS trust roots, `certifi`, and an optional additional PEM trust bundle.
 - Windows x64 EXE/DLL build pipeline with icon embedding, Authenticode signing, signature verification, and SHA-256 manifests.
@@ -32,7 +32,7 @@ runtime dependency.
 2. Double-click `BUILD_AND_SIGN_WINDOWS.bat` to reuse/install supported CPython 3.11-3.15 x64, MSVC, Windows SDK resource compiler, Python build packages, build the EXE and DLL, sign/verify them, create a Desktop shortcut, and package the release.
 3. Run `RUN_DISCORD_STATUS.bat` or `DiscordGlobalStatusMonitor.exe`. The launcher prefers the compiled EXE in the release package (or `dist\windows\exe` in a source checkout); if no EXE exists it probes Python and falls back from an unusable legacy `py.exe` to `python.exe`.
 
-The DLL resource file uses self-contained numeric VERSIONINFO constants to avoid Windows RC2104 (`VOS_NT_WINDOWS32` / `VFT_DLL` macro lookup failures). The Windows EXE collects only Plyer’s Windows notification backend, not unrelated mobile/desktop platform backends. The builder first reuses an installed 64-bit CPython 3.11-3.15 runtime (newest supported version first), including Python 3.15 installations, so it does not install Python unnecessarily. It removes an old ZIP/checksum/signing report before starting so a failed run cannot leave a stale prior release beside partial new artifacts. PyInstaller 6.21+ supports CPython 3.15 and CFFI 2.1+ is tested on CPython 3.11-3.15. If no supported runtime exists, the builder downloads the official Python Manager MSIX from python.org, verifies its published SHA-256, installs it with Add-AppxPackage, and asks `pymanager.exe` to install a runtime. If AppX deployment is blocked, it falls back to the SHA-256 and Authenticode-verified Python.org CPython 3.13.17 installer. It never sends `install` or `list` subcommands to a legacy `py.exe`. Visual Studio Build Tools and the Windows SDK resource compiler can be installed from Microsoft-signed installers without WinGet. UAC elevation is limited to the Microsoft installer process: the main build and signing continue as the original user, so the certificate and Desktop shortcut are created in the correct profile. A timestamped build transcript is written to `.build/windows/logs/`.
+The DLL RC file uses the standard numeric resource identity `1 VERSIONINFO` for RT_VERSION, with self-contained numeric FILEOS/FILETYPE constants. After CFFI links the DLL, the builder applies the compiled resources through Win32 UpdateResourceW, validates RT_VERSION/ID 1 plus the icon records, and verifies ProductVersion/FileDescription before signing. The Windows EXE collects only Plyer’s Windows notification backend, not unrelated mobile/desktop platform backends. The builder first reuses an installed 64-bit CPython 3.11-3.15 runtime (newest supported version first), including Python 3.15 installations, so it does not install Python unnecessarily. It removes an old ZIP/checksum/signing report before starting so a failed run cannot leave a stale prior release beside partial new artifacts. PyInstaller 6.21+ supports CPython 3.15 and CFFI 2.1+ is tested on CPython 3.11-3.15. If no supported runtime exists, the builder downloads the official Python Manager MSIX from python.org, verifies its published SHA-256, installs it with Add-AppxPackage, and asks `pymanager.exe` to install a runtime. If AppX deployment is blocked, it falls back to the SHA-256 and Authenticode-verified Python.org CPython 3.13.17 installer. It never sends `install` or `list` subcommands to a legacy `py.exe`. Visual Studio Build Tools and the Windows SDK resource compiler can be installed from Microsoft-signed installers without WinGet. UAC elevation is limited to the Microsoft installer process: the main build and signing continue as the original user, so the certificate and Desktop shortcut are created in the correct profile. A timestamped build transcript is written to `.build/windows/logs/`.
 
 ### Kali Linux
 
@@ -53,9 +53,9 @@ Default remote provider:
 
 Optional independent provider:
 
-- RIPE Atlas read-only results for existing public measurement IDs. It does not create paid measurements.
+- RIPE Atlas read-only results for existing measurement IDs, refreshed every 15 minutes by default. It does not create measurements or consume measurement credits.
 
-Configure IDs using `.env.example` as a reference, then set the variables in your shell. DGSM does not automatically load `.env` files; this avoids unexpectedly loading secrets from a working directory.
+Configure IDs using `.env.example` as a reference, then set `RIPE_ATLAS_MEASUREMENT_IDS` in your shell or pass `--ripe-atlas-ids`. Use `--no-ripe-atlas` to explicitly disable it. An optional API key is read from `RIPE_ATLAS_API_KEY`; credentials are never included in output. DGSM does not automatically load `.env` files.
 
 ## Common commands
 
@@ -72,8 +72,11 @@ python3 discord_server_global_status.py --json
 # Disable Globalping but retain optional RIPE Atlas
 python3 discord_server_global_status.py --no-globalping
 
-# Existing public RIPE Atlas measurements
+# Existing read-only RIPE Atlas measurements
 python3 discord_server_global_status.py --ripe-atlas-ids 12345678,12345679
+
+# Disable RIPE Atlas even if the environment contains measurement IDs
+python3 discord_server_global_status.py --no-ripe-atlas
 
 # TLS and endpoint diagnostics
 python3 discord_server_global_status.py --doctor
@@ -91,12 +94,13 @@ The Windows builder follows the same operational model as the Destiny 2 Damage T
 2. Create an isolated `.build/windows/venv` and install `requirements-build.txt`.
 3. Generate EXE and DLL version resources from the single version in `dgsm_version.py`.
 4. Build the one-file console EXE with PyInstaller, DGSM ICO and Windows version metadata.
-5. Compile the DLL resource (`assets/DGSM.rc`) using Windows SDK `rc.exe`, then link the `.res` into the CFFI DLL with MSVC.
-6. Smoke-test the EXE and DLL before signing.
-7. Locate a Microsoft-signed SignTool in the installed SDK; otherwise download Microsoft's `Microsoft.Windows.SDK.BuildTools` NuGet package to a temporary directory, verify the embedded SignTool Authenticode signature, and remove temporary files after signing.
-8. Sign both artifacts with SHA-256 Authenticode and try DigiCert then Sectigo RFC 3161 timestamp services. When both timestamp services are unavailable, sign without a timestamp and record that fact.
-9. Verify both signatures using SignTool and Windows Authenticode, then re-run EXE/DLL smoke tests.
-10. Validate the embedded EXE/DLL ProductVersion and FileDescription resources, create a Desktop shortcut, record the exact build dependency versions, generate a SHA-256 file manifest, validate required ZIP entries, and remove build intermediates unless `-KeepBuildCache` is requested.
+5. Compile the DLL icon/version resource (`assets/DGSM.rc`) using Windows SDK `rc.exe`; RT_VERSION must use numeric name ID 1 (`1 VERSIONINFO`).
+6. Link the `.res` into the CFFI DLL, then apply/validate resources with Win32 UpdateResourceW before checking DLL metadata.
+7. Smoke-test the EXE and DLL before signing.
+8. Locate a Microsoft-signed SignTool in the installed SDK; otherwise download Microsoft's `Microsoft.Windows.SDK.BuildTools` NuGet package to a temporary directory, verify the embedded SignTool Authenticode signature, and remove temporary files after signing.
+9. Sign both artifacts with SHA-256 Authenticode and try DigiCert then Sectigo RFC 3161 timestamp services. When both timestamp services are unavailable, sign without a timestamp and record that fact.
+10. Verify both signatures using SignTool and Windows Authenticode, then re-run EXE/DLL smoke tests.
+11. Validate the embedded EXE/DLL ProductVersion and FileDescription resources, create a Desktop shortcut, record the exact build dependency versions, generate a SHA-256 file manifest, validate required ZIP entries, and remove build intermediates unless `-KeepBuildCache` is requested.
 
 By default, the builder creates/reuses a user-scoped self-signed development code-signing certificate in `Cert:\CurrentUser\My`, exports its public `.cer`, and trusts it only in the current user's Root and TrustedPublisher stores. This makes signatures verifiable for local development on that Windows profile; it does not provide public publisher trust or SmartScreen reputation. For production distribution set `DGSM_PFX_PATH` to a CA-issued code-signing PFX. The password is prompted securely, or may be supplied in `DGSM_PFX_PASSWORD` for automation (avoid persistent environment variables and shell history).
 
