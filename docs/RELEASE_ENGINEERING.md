@@ -7,7 +7,7 @@ This document describes how the repository currently builds and validates artifa
 `dgsm_version.py` is the canonical version source. For DGSM 3.4.5 it exports:
 
 - `__version__ = "3.4.5"`
-- `__version_info__ = (3, 4, 4)`
+- `__version_info__ = (3, 4, 5)`
 
 Windows resource templates, the EXE, DLL, native build metadata, and package metadata must agree with this source. `pyproject.toml` also declares the package version; update it in the same versioned change and add matching release notes.
 
@@ -108,7 +108,7 @@ Before publishing a versioned GitHub Release:
 - [ ] On Linux, record the interpreter/ABI details and verify the zipapp/shared-library smoke tests and checksum/signature outputs.
 - [ ] Compute SHA-256 hashes for the exact final files; do not reuse hashes from an earlier build.
 - [ ] Attach the release ZIP, separately useful binaries/source support files, release notes, checksums, and signing report as appropriate.
-- [ ] Label unsigned artifacts unambiguously. Never call CI's `-SkipSigning` output signed.
+- [ ] Label unsigned artifacts unambiguously. The Linux CI artifact remains unsigned. The Windows CI artifact is development-signed with a self-signed certificate, not publicly trusted.
 - [ ] Create a version tag that points at the exact reviewed commit and verify the tag/asset association after publishing.
 
 An annotated Git tag can be created from the checked-out release commit with:
