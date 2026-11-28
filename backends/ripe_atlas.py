@@ -8,7 +8,10 @@ API key is optional and is only sent when RIPE_ATLAS_API_KEY is configured.
 from __future__ import annotations
 
 import concurrent.futures
+import ipaddress
 import json
+import math
+import re
 import statistics
 import time
 import urllib.error
@@ -17,6 +20,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from backends.http_transport import safe_urlopen
 from dgsm_version import __version__ as DGSM_VERSION
 
 API_BASE = "https://atlas.ripe.net/api/v2/measurements"
@@ -31,19 +35,23 @@ class BackendError(RuntimeError):
 def parse_measurement_ids(raw: Optional[str], maximum: int = 8) -> list[int]:
     if not raw:
         return []
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+        raise BackendError("RIPE Atlas measurement ID limit must be a positive integer.")
+    if not isinstance(raw, str) or len(raw) > 512:
+        raise BackendError("RIPE Atlas measurement ID list exceeds the 512-character limit.")
     values: list[int] = []
     seen: set[int] = set()
     for item in raw.split(","):
         token = item.strip()
         if not token:
             continue
-        if not token.isdecimal():
+        if not token.isascii() or not token.isdigit() or len(token) > 19:
             raise BackendError(
-                f"Invalid RIPE Atlas measurement ID {token!r}; use comma-separated numeric IDs."
+                f"Invalid RIPE Atlas measurement ID {token!r}; use positive ASCII numeric IDs up to 19 digits."
             )
         value = int(token)
-        if value <= 0:
-            raise BackendError("RIPE Atlas measurement IDs must be positive integers.")
+        if value <= 0 or value > 9_223_372_036_854_775_807:
+            raise BackendError("RIPE Atlas measurement IDs must be positive 64-bit integers.")
         if value not in seen:
             values.append(value)
             seen.add(value)
@@ -53,13 +61,13 @@ def parse_measurement_ids(raw: Optional[str], maximum: int = 8) -> list[int]:
 
 
 def _numeric(value: Any) -> Optional[float]:
+    if value is None or isinstance(value, bool):
+        return None
     try:
         number = float(value)
-        if number < 0:
-            return None
-        return number
     except (TypeError, ValueError, OverflowError):
         return None
+    return number if math.isfinite(number) and number >= 0 else None
 
 
 def _get_json(
@@ -86,7 +94,12 @@ def _get_json(
     request = urllib.request.Request(url, headers=headers, method="GET")
     started = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
+        with safe_urlopen(
+            request,
+            timeout=timeout,
+            context=context,
+            allowed_hosts={"atlas.ripe.net"},
+        ) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
             if len(raw) > MAX_RESPONSE_BYTES:
                 raise BackendError(
@@ -115,8 +128,10 @@ def _get_json(
         raise BackendError(f"RIPE Atlas returned invalid JSON: {exc}") from exc
 
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if not isinstance(payload, (dict, list)):
+        raise BackendError("RIPE Atlas latest endpoint returned an unexpected JSON shape.")
     if isinstance(payload, dict) and payload.get("detail"):
-        raise BackendError(f"RIPE Atlas: {payload['detail']}")
+        raise BackendError(f"RIPE Atlas: {str(payload['detail'])[:400]}")
     rows: list[dict[str, Any]] = []
     if isinstance(payload, list):
         # Accept the results endpoint response shape for compatibility with
@@ -179,13 +194,19 @@ def normalize_results(measurement_id: int, records: list[dict[str, Any]]) -> dic
     for record in records:
         rtts, sent = _extract_rtts(record)
         probe_id = record.get("prb_id") or record.get("probe_id") or "?"
-        target = str(record.get("dst_name") or record.get("dst_addr") or "unknown")
+        raw_target = record.get("dst_name") or record.get("dst_addr") or "unknown"
+        target = str(raw_target)[:255].replace("\r", " ").replace("\n", " ")
         targets.add(target)
+        raw_source_ip = record.get("from") or ""
+        try:
+            source_ip = str(ipaddress.ip_address(raw_source_ip)) if raw_source_ip else ""
+        except (ValueError, TypeError):
+            source_ip = str(raw_source_ip)[:64].replace("\r", " ").replace("\n", " ")
         avg = statistics.mean(rtts) if rtts else None
         loss = (100.0 * (sent - len(rtts)) / sent) if sent > 0 else None
         row = {
-            "probe_id": probe_id,
-            "source_ip": str(record.get("from") or ""),
+            "probe_id": str(probe_id)[:32],
+            "source_ip": source_ip,
             "target": target,
             "timestamp": record.get("timestamp"),
             "latency_ms": avg,
