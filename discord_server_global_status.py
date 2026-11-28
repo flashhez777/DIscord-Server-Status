@@ -6,8 +6,8 @@ public service status, incidents, maintenance, voice regions and client status.
 It also offers clearly-labelled local connectivity probes from this machine.
 
 No Discord account, bot token, or API key is needed. The core monitor uses
-Python's standard library. Optional notification/color packages are installed
-automatically into a private app-local folder when possible.
+Python's standard library. Optional notification, DNS-detail and host-metric
+packages install only when explicitly requested with --auto-install.
 Python 3.9+ recommended.
 """
 
@@ -18,9 +18,11 @@ import base64
 import concurrent.futures
 import ctypes
 import hashlib
+import ipaddress
 import importlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import random
@@ -31,7 +33,9 @@ import ssl
 import statistics
 import subprocess
 import sys
+import tempfile
 import textwrap
+import unicodedata
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from backends.http_transport import safe_urlopen
 from dgsm_version import __version__ as VERSION
 
 APP_NAME = "Discord Global Status Monitor"
@@ -56,6 +61,14 @@ GLOBALPING_API = "https://api.globalping.io/v1"
 GLOBALPING_MEASUREMENTS = GLOBALPING_API + "/measurements"
 GLOBALPING_RATE_LIMITS = GLOBALPING_API + "/limits"
 GLOBALPING_DEFAULT_TARGET = "gateway.discord.gg"
+MAX_GLOBALPING_RESULT_ROWS = 100
+MAX_DNS_ANSWER_RECORDS = 64
+DNS_RCODE_NAMES = {
+    0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN",
+    4: "NOTIMP", 5: "REFUSED", 6: "YXDOMAIN", 7: "YXRRSET",
+    8: "NXRRSET", 9: "NOTAUTH", 10: "NOTZONE", 11: "DSOTYPENI",
+    16: "BADVERS",
+}
 
 # ANSI palette. ANSI mode is enabled on Windows terminals where supported.
 RESET = "\033[0m"
@@ -161,10 +174,33 @@ def status_label(status: str) -> str:
     return (status or "unknown").replace("_", " ").upper()
 
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))"
+    r"|\x9B[0-?]*[ -/]*[@-~]|\x9D[^\x07\x9C]*(?:\x07|\x9C)"
+)
+_BIDI_CONTROL_CODEPOINTS = (
+    {0x061C, 0x200E, 0x200F}
+    | set(range(0x202A, 0x202F))
+    | set(range(0x2066, 0x206A))
+)
+
+
 def clip(value: Any, width: int) -> str:
-    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    """Bound untrusted text and remove terminal/bidirectional control injection."""
     if width <= 0:
         return ""
+    raw = _ANSI_ESCAPE_RE.sub("", str(value))
+    safe_chars: list[str] = []
+    for character in raw:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character in "\r\n\t":
+            safe_chars.append(" ")
+        elif category in {"Cc", "Cs"} or codepoint in _BIDI_CONTROL_CODEPOINTS:
+            continue
+        else:
+            safe_chars.append(character)
+    text = " ".join("".join(safe_chars).split())
     if len(text) <= width:
         return text
     if width == 1:
@@ -194,8 +230,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beep", action="store_true", help="Beep when a meaningful status change is detected.")
     parser.add_argument("--no-notifications", action="store_true",
                         help="Disable native desktop notifications.")
-    parser.add_argument("--no-auto-install", action="store_true",
-                        help="Do not automatically install optional packages.")
+    parser.add_argument("--auto-install", dest="auto_install", action="store_true",
+                        help="Explicitly install optional packages from HTTPS PyPI using binary wheels.")
+    parser.add_argument("--no-auto-install", dest="auto_install", action="store_false",
+                        help="Keep optional package installation disabled (the default).")
+    parser.set_defaults(auto_install=False)
     parser.add_argument("--no-globalping", action="store_true",
                         help="Disable third-party worldwide measurements (Globalping).")
     parser.add_argument("--global-probes", type=int, default=10,
@@ -234,12 +273,15 @@ def parse_args() -> argparse.Namespace:
                         help="Override the directory used for local state, vendor packages and event history.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     args = parser.parse_args()
-    if args.interval < 10:
-        parser.error("--interval must be at least 10 seconds to avoid excessive polling")
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than zero")
-    if args.ripe_atlas_interval < 300:
-        parser.error("--ripe-atlas-interval must be at least 300 seconds")
+    args.no_auto_install = not args.auto_install
+    if not math.isfinite(args.interval) or args.interval < 10:
+        parser.error("--interval must be finite and at least 10 seconds")
+    if not math.isfinite(args.timeout) or not 0 < args.timeout <= 300:
+        parser.error("--timeout must be finite and between 0 and 300 seconds")
+    if not math.isfinite(args.ripe_atlas_interval) or args.ripe_atlas_interval < 300:
+        parser.error("--ripe-atlas-interval must be finite and at least 300 seconds")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.globalping_token_env):
+        parser.error("--globalping-token-env must be a valid environment-variable name")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.ripe_atlas_api_key_env):
         parser.error("--ripe-atlas-api-key-env must be a valid environment-variable name")
     if args.no_ripe_atlas:
@@ -257,8 +299,9 @@ def parse_args() -> argparse.Namespace:
     if not 1 <= args.trace_probes <= 10:
         parser.error("--trace-probes must be between 1 and 10")
     for name in ("global_interval", "http_interval", "dns_interval", "cdn_interval", "trace_interval"):
-        if getattr(args, name) < 60:
-            parser.error(f"--{name.replace('_', '-')} must be at least 60 seconds")
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 60:
+            parser.error(f"--{name.replace('_', '-')} must be finite and at least 60 seconds")
     # Globalping counts probe executions as tests. Keep defaults well below
     # its published anonymous hourly budget and account for custom settings.
     estimated = (
@@ -322,6 +365,7 @@ def bootstrap_optional_dependencies(args: argparse.Namespace, data_dir: Path) ->
         packages.append(("colorama", "colorama>=0.4.6", "0.4.6"))
 
     vendor_dir = data_dir / "vendor"
+    ensure_private_directory(vendor_dir)
     if str(vendor_dir) not in sys.path:
         sys.path.insert(0, str(vendor_dir))
 
@@ -366,7 +410,8 @@ def bootstrap_optional_dependencies(args: argparse.Namespace, data_dir: Path) ->
             vendor_dir.mkdir(parents=True, exist_ok=True)
             command = [
                 sys.executable, "-m", "pip", "install",
-                "--disable-pip-version-check", "--quiet", "--upgrade",
+                "--disable-pip-version-check", "--quiet", "--no-input", "--upgrade",
+                "--only-binary=:all:", "--index-url", "https://pypi.org/simple",
                 "--target", str(vendor_dir), requirement,
             ]
             result = subprocess.run(
@@ -614,7 +659,10 @@ def request_json(url: str, timeout: float) -> tuple[dict[str, Any], float]:
     )
     start = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=tls_context()) as response:
+        with safe_urlopen(
+            request, timeout=timeout, context=tls_context(),
+            allowed_hosts={"discordstatus.com", "discord.com"},
+        ) as response:
             code = getattr(response, "status", 200)
             if code != 200:
                 raise MonitorError(f"HTTP {code}")
@@ -622,9 +670,15 @@ def request_json(url: str, timeout: float) -> tuple[dict[str, Any], float]:
             if len(raw) > 2 * 1024 * 1024:
                 raise MonitorError("Discord Statuspage summary exceeded the 2 MiB response safety limit")
     except urllib.error.HTTPError as exc:
-        retry_after = exc.headers.get("Retry-After") if exc.headers else None
-        suffix = f"; Retry-After: {retry_after}s" if retry_after else ""
-        raise MonitorError(f"HTTP {exc.code} {exc.reason}{suffix}") from exc
+        try:
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            suffix = f"; Retry-After: {retry_after}s" if retry_after else ""
+            raise MonitorError(f"HTTP {exc.code} {exc.reason}{suffix}") from exc
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
     except urllib.error.URLError as exc:
         tls_detail = tls_failure_message(exc)
         if tls_detail:
@@ -662,11 +716,29 @@ def probe_rest_api(timeout: float) -> ProbeResult:
     try:
         data, _ = request_json(REST_GATEWAY_URL, timeout)
         gateway_url = data.get("url")
-        if not isinstance(gateway_url, str) or not gateway_url.startswith("wss://"):
-            return ProbeResult("REST API", "WARN", (time.perf_counter() - start) * 1000,
-                               "HTTP responded, but Gateway URL was missing")
+        try:
+            parsed_gateway = urlsplit(gateway_url) if isinstance(gateway_url, str) else None
+            gateway_port = parsed_gateway.port if parsed_gateway is not None else None
+        except ValueError:
+            parsed_gateway = None
+            gateway_port = None
+        valid_gateway_url = bool(
+            parsed_gateway is not None
+            and parsed_gateway.scheme.casefold() == "wss"
+            and (parsed_gateway.hostname or "").rstrip(".").casefold() == GATEWAY_HOST
+            and gateway_port in (None, 443)
+            and parsed_gateway.username is None
+            and parsed_gateway.password is None
+            and parsed_gateway.path in ("", "/")
+            and not parsed_gateway.fragment
+        )
+        if not valid_gateway_url:
+            return ProbeResult(
+                "REST API", "WARN", (time.perf_counter() - start) * 1000,
+                "HTTP responded, but returned an invalid or unexpected Gateway URL",
+            )
         return ProbeResult("REST API", "UP", (time.perf_counter() - start) * 1000,
-                           "GET /api/v10/gateway returned a valid Gateway URL")
+                           "GET /api/v10/gateway returned the expected Discord Gateway URL")
     except Exception as exc:
         return ProbeResult("REST API", "DOWN", (time.perf_counter() - start) * 1000, str(exc))
 
@@ -778,7 +850,10 @@ def probe_cdn(timeout: float) -> ProbeResult:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=tls_context()) as response:
+        with safe_urlopen(
+            request, timeout=timeout, context=tls_context(),
+            allowed_hosts={"cdn.discordapp.com"},
+        ) as response:
             code = getattr(response, "status", 200)
             # Read a small amount to verify that the endpoint actually serves data.
             sample = response.read(64)
@@ -787,8 +862,14 @@ def probe_cdn(timeout: float) -> ProbeResult:
                 return ProbeResult("Media CDN", "UP", elapsed, "Discord CDN image endpoint returned data")
             return ProbeResult("Media CDN", "WARN", elapsed, f"HTTP {code}; response body was empty")
     except urllib.error.HTTPError as exc:
-        return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0,
-                           f"HTTP {exc.code} {exc.reason}")
+        try:
+            return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0,
+                               f"HTTP {exc.code} {exc.reason}")
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
     except Exception as exc:
         detail = tls_failure_message(exc) or str(exc)
         return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0, detail)
@@ -811,13 +892,46 @@ def run_local_probes(timeout: float) -> list[ProbeResult]:
 def globalping_request(method: str, url: str, timeout: float,
                        token: Optional[str] = None,
                        payload: Optional[dict[str, Any]] = None) -> tuple[dict[str, Any], dict[str, str]]:
-    """Call Globalping with strict TLS and bounded retries for idempotent GETs.
-
-    POST measurement creation is never retried automatically: if a connection
-    drops after the server accepted a POST, retrying could create duplicate tests.
-    """
+    """Call only the official Globalping HTTPS API with bounded safe retries."""
     normalized_method = method.upper()
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    if normalized_method not in {"GET", "POST"}:
+        raise MonitorError("Globalping requests are limited to GET and POST.")
+    try:
+        parsed_url = urlsplit(url)
+        port = parsed_url.port
+    except (TypeError, ValueError) as exc:
+        raise MonitorError(f"Invalid Globalping API URL: {exc}") from exc
+    if (
+        parsed_url.scheme.casefold() != "https"
+        or (parsed_url.hostname or "").rstrip(".").casefold() != "api.globalping.io"
+        or port not in (None, 443)
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise MonitorError("Globalping requests must use the official api.globalping.io HTTPS origin.")
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise MonitorError("Globalping request timeout must be finite and between 0 and 300 seconds.")
+    allowed_paths = {"/v1/limits", "/v1/measurements"}
+    measurement_path = re.fullmatch(r"/v1/measurements/[A-Za-z0-9_-]{1,128}", parsed_url.path)
+    if parsed_url.path not in allowed_paths and not measurement_path:
+        raise MonitorError("Globalping API path is not an allowed DGSM endpoint.")
+    if normalized_method == "POST" and parsed_url.path != "/v1/measurements":
+        raise MonitorError("Globalping POST is restricted to measurement creation.")
+    if normalized_method == "GET" and payload is not None:
+        raise MonitorError("Globalping GET requests cannot include a request body.")
+    if normalized_method == "POST" and not isinstance(payload, dict):
+        raise MonitorError("Globalping measurement creation requires a JSON object payload.")
+    if token is not None and (
+        not isinstance(token, str) or not token or len(token) > 8192
+        or "\r" in token or "\n" in token
+    ):
+        raise MonitorError("Globalping bearer token contains invalid characters or exceeds the size limit.")
+    try:
+        body = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise MonitorError(f"Globalping request payload is not valid JSON: {exc}") from exc
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json",
@@ -836,8 +950,11 @@ def globalping_request(method: str, url: str, timeout: float,
             url, data=body, headers=headers, method=normalized_method
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=timeout, context=tls_context()
+            with safe_urlopen(
+                request,
+                timeout=timeout,
+                context=tls_context(),
+                allowed_hosts={"api.globalping.io"},
             ) as response:
                 raw = response.read(4 * 1024 * 1024 + 1)
                 if len(raw) > 4 * 1024 * 1024:
@@ -877,20 +994,26 @@ def globalping_request(method: str, url: str, timeout: float,
                         detail = clip(errors, 1000)
             except Exception:
                 pass
-            retry = exc.headers.get("Retry-After") if exc.headers else None
-            suffix = f"; Retry-After={retry}s" if retry else ""
-            if exc.code == 429:
+            try:
+                retry = exc.headers.get("Retry-After") if exc.headers else None
+                suffix = f"; Retry-After={retry}s" if retry else ""
+                if exc.code == 429:
+                    raise MonitorError(
+                        f"Globalping rate limit (HTTP 429){suffix}. Wait for the provider reset "
+                        f"or reduce measurements; optional authentication uses {argsafe_env_name()}."
+                    ) from exc
+                if normalized_method == "GET" and exc.code in {500, 502, 503, 504} and attempt + 1 < attempts:
+                    time.sleep(0.5 * (2 ** attempt) + random.uniform(0.0, 0.25))
+                    last_error = exc
+                    continue
                 raise MonitorError(
-                    f"Globalping rate limit (HTTP 429){suffix}. Wait for the provider reset "
-                    f"or reduce measurements; optional authentication uses {argsafe_env_name()}."
+                    f"Globalping HTTP {exc.code}: {detail or exc.reason}{suffix}"
                 ) from exc
-            if normalized_method == "GET" and exc.code in {500, 502, 503, 504} and attempt + 1 < attempts:
-                time.sleep(0.5 * (2 ** attempt) + random.uniform(0.0, 0.25))
-                last_error = exc
-                continue
-            raise MonitorError(
-                f"Globalping HTTP {exc.code}: {detail or exc.reason}{suffix}"
-            ) from exc
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
 
         except urllib.error.URLError as exc:
             tls_detail = tls_failure_message(exc)
@@ -923,12 +1046,16 @@ def argsafe_env_name() -> str:
 
 
 def numeric(value: Any) -> Optional[float]:
+    """Parse finite, non-negative network metrics; reject booleans and NaN/Inf."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
     try:
-        if value is None or value == "":
-            return None
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    return parsed
 
 
 def fetch_globalping_limits(args: argparse.Namespace) -> dict[str, Any]:
@@ -1031,12 +1158,186 @@ def create_globalping_measurement(test_type: str, target: str, probe_limit: int,
     return final
 
 
+def _parse_dns_ttl(value: Any) -> Optional[int]:
+    """Validate a DNS TTL as an unsigned 31-bit integer."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        ttl = value
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        ttl = int(value)
+    elif isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 10:
+        try:
+            ttl = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return ttl if 0 <= ttl <= 2_147_483_647 else None
+
+
+def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
+    """Canonicalize DNS RRsets; answer order and cache TTL do not define identity."""
+    raw_answers = answers if isinstance(answers, list) else []
+    truncated = len(raw_answers) > MAX_DNS_ANSWER_RECORDS
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    rrset_ttls: dict[tuple[str, str], set[int]] = {}
+    invalid_records = 0
+    missing_ttls = 0
+
+    for answer in raw_answers[:MAX_DNS_ANSWER_RECORDS]:
+        if not isinstance(answer, dict):
+            invalid_records += 1
+            continue
+        raw_name = answer.get("name") or fallback_target
+        if not isinstance(raw_name, str):
+            invalid_records += 1
+            continue
+        name = raw_name.strip().lower().rstrip(".")
+        if (
+            not name or len(name) > 253
+            or any(ch.isspace() or ord(ch) < 33 for ch in name)
+        ):
+            invalid_records += 1
+            continue
+        name += "."
+
+        raw_type = answer.get("type")
+        if not isinstance(raw_type, str):
+            invalid_records += 1
+            continue
+        record_type = raw_type.strip().upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]{0,15}", record_type):
+            invalid_records += 1
+            continue
+
+        raw_value = answer.get("value")
+        if not isinstance(raw_value, (str, int, float)) or isinstance(raw_value, bool):
+            invalid_records += 1
+            continue
+        raw_value_text = str(raw_value).strip()
+        if not raw_value_text or len(raw_value_text) > 1024:
+            invalid_records += 1
+            continue
+        value = clip(raw_value_text, 1024)
+        if record_type in {"A", "AAAA"}:
+            try:
+                address = ipaddress.ip_address(value)
+                if (record_type == "A" and address.version != 4) or (
+                    record_type == "AAAA" and address.version != 6
+                ):
+                    raise ValueError("address family does not match record type")
+                value = str(address)
+            except ValueError:
+                invalid_records += 1
+                continue
+
+        if record_type == "CNAME":
+            cname_target = value.strip().lower().rstrip(".")
+            if (
+                not cname_target or len(cname_target) > 253
+                or any(ch.isspace() or ord(ch) < 33 for ch in cname_target)
+            ):
+                invalid_records += 1
+                continue
+            value = cname_target + "."
+
+        ttl = _parse_dns_ttl(answer.get("ttl"))
+        if ttl is None:
+            missing_ttls += 1
+
+        identity = (name.casefold(), record_type, value)
+        record = grouped.setdefault(
+            identity,
+            {"name": name, "type": record_type, "value": value, "_ttls": set()},
+        )
+        if ttl is not None:
+            record["_ttls"].add(ttl)
+            rrset_ttls.setdefault((name.casefold(), record_type), set()).add(ttl)
+
+    ordered_records = sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["name"].casefold(), item["type"],
+            item["value"].casefold(), item["value"],
+        ),
+    )
+    normalized_records: list[dict[str, Any]] = []
+    rendered_answers: list[str] = []
+    answer_set: list[str] = []
+    address_answers: list[str] = []
+    all_ttls: list[int] = []
+
+    for record in ordered_records:
+        ttl_values = sorted(record["_ttls"])
+        ttl = ttl_values[0] if ttl_values else None
+        normalized_records.append({
+            "name": record["name"], "type": record["type"],
+            "value": record["value"], "ttl": ttl,
+        })
+        identity_text = f"{record['name']} {record['type']} {record['value']}"
+        answer_set.append(identity_text)
+        rendered_answers.append(identity_text + (f" (TTL {ttl})" if ttl is not None else ""))
+        all_ttls.extend(ttl_values)
+
+    # Count A/AAAA records only when they belong to the queried owner name or
+    # to a CNAME target reachable from it. Unrelated records in the answer
+    # section must not make an unsuccessful gateway lookup appear healthy.
+    query_name = fallback_target.strip().lower().rstrip(".") + "."
+    reachable_names = {query_name}
+    for _ in range(16):
+        previous_count = len(reachable_names)
+        for record in normalized_records:
+            if record["type"] == "CNAME" and record["name"] in reachable_names:
+                reachable_names.add(record["value"])
+        if len(reachable_names) == previous_count:
+            break
+
+    all_address_records = [
+        record for record in normalized_records if record["type"] in {"A", "AAAA"}
+    ]
+    address_answers = sorted({
+        record["value"] for record in all_address_records
+        if record["name"] in reachable_names
+    })
+    unrelated_address_answers = sum(
+        1 for record in all_address_records if record["name"] not in reachable_names
+    )
+
+    ttl_conflicts = sum(1 for values in rrset_ttls.values() if len(values) > 1)
+    ttl_values = sorted(all_ttls)
+    return {
+        "answer_records": normalized_records,
+        "answers": rendered_answers,
+        "answer_set": answer_set,
+        "address_answers": address_answers,
+        "address_answer_count": len(address_answers),
+        "unrelated_address_answers": unrelated_address_answers,
+        "answer_count": len(normalized_records),
+        "ttl_min": min(ttl_values) if ttl_values else None,
+        "ttl_max": max(ttl_values) if ttl_values else None,
+        "ttl_consistent": ttl_conflicts == 0,
+        "ttl_conflicts": ttl_conflicts,
+        "missing_ttls": missing_ttls,
+        "invalid_records": invalid_records,
+        "answers_truncated": truncated,
+        "validation_ok": (
+            ttl_conflicts == 0 and missing_ttls == 0
+            and invalid_records == 0 and not truncated
+        ),
+    }
+
+
 def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize Globalping results to a stable, loggable telemetry record."""
+    """Normalize provider data with bounded rows and validated DNS RRsets."""
+    if not isinstance(data, dict):
+        raise MonitorError("Globalping measurement response must be a JSON object.")
     rows: list[dict[str, Any]] = []
     all_rtts: list[float] = []
     all_losses: list[float] = []
-    results = data.get("results") if isinstance(data.get("results"), list) else []
+    raw_results = data.get("results") if isinstance(data.get("results"), list) else []
+    results_truncated = len(raw_results) > MAX_GLOBALPING_RESULT_ROWS
+    results = raw_results[:MAX_GLOBALPING_RESULT_ROWS]
 
     for entry in results:
         if not isinstance(entry, dict):
@@ -1049,14 +1350,14 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         avg = numeric(stats.get("avg"))
         loss = numeric(stats.get("loss"))
         row: dict[str, Any] = {
-            "continent": str(probe.get("continent") or "?"),
-            "region": str(probe.get("region") or ""),
-            "country": str(probe.get("country") or "?"),
-            "city": str(probe.get("city") or "Unknown"),
-            "location": loc or str(probe.get("country") or "Unknown"),
-            "network": str(probe.get("network") or "unknown network"),
-            "asn": str(probe.get("asn") or ""),
-            "status": str(result.get("status") or "unknown"),
+            "continent": clip(probe.get("continent") or "?", 40),
+            "region": clip(probe.get("region") or "", 48),
+            "country": clip(probe.get("country") or "?", 40),
+            "city": clip(probe.get("city") or "Unknown", 72),
+            "location": clip(loc or probe.get("country") or "Unknown", 96),
+            "network": clip(probe.get("network") or "unknown network", 96),
+            "asn": clip(probe.get("asn") or "", 32),
+            "status": clip(result.get("status") or "unknown", 40),
             "latency_ms": avg,
             "min_ms": numeric(stats.get("min")),
             "max_ms": numeric(stats.get("max")),
@@ -1094,39 +1395,77 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
             if dns_time is not None:
                 all_rtts.append(dns_time)
             raw_status_code = result.get("statusCode")
-            status_name = result.get("statusCodeName")
-            # Globalping uses numeric DNS RCODE 0 for NOERROR. Do not use
-            # truthiness here: zero is a valid success code, not missing data.
-            status_text = str(
-                status_name if status_name not in (None, "")
-                else raw_status_code if raw_status_code is not None
-                else "unknown"
-            ).strip()
-            answers = result.get("answers") if isinstance(result.get("answers"), list) else []
-            answer_texts: list[str] = []
-            for answer in answers[:8]:
-                if isinstance(answer, dict):
-                    answer_name = str(answer.get("name") or "")
-                    answer_type = str(answer.get("type") or "")
-                    answer_value = str(answer.get("value") or "")
-                    answer_ttl = answer.get("ttl")
-                    parts = [part for part in (answer_name, answer_type, answer_value) if part]
-                    rendered = " ".join(parts) or json.dumps(answer, ensure_ascii=False, sort_keys=True)
-                    if isinstance(answer_ttl, (int, float)):
-                        rendered += f" (TTL {int(answer_ttl)})"
-                    answer_texts.append(clip(rendered, 100))
-                else:
-                    answer_texts.append(clip(answer, 100))
-            successful_rcode = status_text.casefold() in {"noerror", "0", "success"}
+            raw_status_name = result.get("statusCodeName")
             numeric_rcode = numeric(raw_status_code)
-            if numeric_rcode == 0:
-                successful_rcode = True
+            if numeric_rcode is not None and numeric_rcode.is_integer():
+                status_text = DNS_RCODE_NAMES.get(
+                    int(numeric_rcode), clip(raw_status_name or str(int(numeric_rcode)), 32).upper()
+                )
+            elif raw_status_name not in (None, ""):
+                status_text = clip(raw_status_name, 32).upper()
+            elif raw_status_code not in (None, ""):
+                status_text = clip(raw_status_code, 32).upper()
+            else:
+                status_text = "UNKNOWN"
+
+            dns_answers = normalize_dns_answers(result.get("answers"), target)
+            row.update(dns_answers)
+            successful_rcode = numeric_rcode == 0 or status_text in {"NOERROR", "SUCCESS"}
+            resolver_responded = (
+                numeric_rcode is not None
+                or raw_status_name not in (None, "")
+                or raw_status_code not in (None, "")
+            )
+            resolver_error = clip(result.get("error"), 240) if result.get("error") else ""
+            answer_count = dns_answers["answer_count"]
+
+            if resolver_error:
+                answer_state = "ERROR"
+            elif not resolver_responded:
+                answer_state = "UNKNOWN"
+            elif successful_rcode and dns_answers["address_answer_count"]:
+                answer_state = "RESOLVED"
+            elif successful_rcode:
+                answer_state = "NODATA"
+            else:
+                answer_state = status_text
+
             row["dns_status"] = status_text
-            row["answers"] = answer_texts
-            # NOERROR/NODATA is a valid DNS response even when the requested
-            # RRset is empty; resolver success and answer presence are distinct.
-            row["state"] = "UP" if successful_rcode else "WARN"
-            row["detail"] = f"DNS {status_text}; {len(answer_texts)} answer(s)"
+            row["resolver_responded"] = bool(resolver_responded)
+            row["dns_answer_state"] = answer_state
+            row["dns_error"] = resolver_error or None
+
+            # NOERROR confirms the resolver answered; it does not confirm that
+            # the requested gateway A RRset contains usable addresses.
+            if resolver_error or status_text == "SERVFAIL":
+                row["state"] = "DOWN"
+            elif (
+                not successful_rcode
+                or dns_answers["address_answer_count"] == 0
+                or not dns_answers["validation_ok"]
+            ):
+                row["state"] = "WARN"
+            else:
+                row["state"] = "UP"
+
+            if resolver_error:
+                detail = f"DNS resolver error: {resolver_error}"
+            elif successful_rcode and dns_answers["address_answer_count"] == 0:
+                detail = (
+                    f"DNS {status_text}/NODATA; resolver responded; "
+                    f"{dns_answers['answer_count']} record(s), 0 A/AAAA address answer(s)"
+                )
+            else:
+                detail = f"DNS {status_text}; {answer_count} answer(s)"
+            if dns_answers["ttl_conflicts"]:
+                detail += "; inconsistent TTLs within an RRset"
+            if dns_answers["missing_ttls"]:
+                detail += f"; {dns_answers['missing_ttls']} record(s) missing a valid TTL"
+            if dns_answers["invalid_records"]:
+                detail += f"; {dns_answers['invalid_records']} malformed record(s) ignored"
+            if dns_answers["answers_truncated"]:
+                detail += "; answer list truncated at the safety limit"
+            row["detail"] = clip(detail, 320)
         elif test_type in {"mtr", "traceroute"}:
             hops = result.get("hops") if isinstance(result.get("hops"), list) else []
             hop_summaries = []
@@ -1136,8 +1475,8 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
                 hop_stats = hop.get("stats") if isinstance(hop.get("stats"), dict) else {}
                 hop_avg = numeric(hop_stats.get("avg"))
                 hop_summaries.append({
-                    "address": str(hop.get("resolvedAddress") or "*"),
-                    "hostname": str(hop.get("resolvedHostname") or ""),
+                    "address": clip(hop.get("resolvedAddress") or "*", 96),
+                    "hostname": clip(hop.get("resolvedHostname") or "", 128),
                     "avg_ms": hop_avg,
                     "loss_pct": numeric(hop_stats.get("loss")),
                     "asn": hop.get("asn") or [],
@@ -1168,14 +1507,32 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         "warn": sum(1 for row in rows if row.get("state") == "WARN"),
         "down": sum(1 for row in rows if row.get("state") == "DOWN"),
     }
+    if test_type == "dns":
+        resolved_rows = [row for row in rows if row.get("dns_answer_state") == "RESOLVED"]
+        validated_rows = [
+            row for row in resolved_rows if row.get("state") == "UP"
+        ]
+        signatures = {tuple(row.get("answer_set", [])) for row in resolved_rows}
+        summary.update({
+            "resolver_responses": sum(1 for row in rows if row.get("resolver_responded")),
+            "resolved": len(resolved_rows),
+            "validated": len(validated_rows),
+            "nodata": sum(1 for row in rows if row.get("dns_answer_state") == "NODATA"),
+            "unique_answer_sets": len(signatures),
+            "answer_set_consistent": (
+                len(signatures) == 1 and len(validated_rows) == len(rows)
+                if rows else None
+            ),
+        })
     return {
-        "type": test_type,
-        "target": target,
-        "status": str(data.get("status") or "unknown"),
-        "measurement_id": str(data.get("_measurement_id") or data.get("id") or ""),
+        "type": clip(test_type, 24),
+        "target": clip(target, 255),
+        "status": clip(data.get("status") or "unknown", 40),
+        "measurement_id": clip(data.get("_measurement_id") or data.get("id") or "", 128),
         "completed_at": iso_now(),
         "elapsed_ms": numeric(data.get("_elapsed_ms")),
-        "probes_count": int(data.get("probesCount") or len(rows)),
+        "probes_count": len(rows),
+        "results_truncated": results_truncated,
         "rows": rows,
         "summary": summary,
     }
@@ -1229,8 +1586,43 @@ def run_global_telemetry(test_type: str, args: argparse.Namespace) -> dict[str, 
         }
 
 
+def ensure_private_directory(path: Path) -> None:
+    """Create a private app data directory and reject a symlink at its leaf."""
+    path = path.expanduser()
+    if path.is_symlink():
+        raise MonitorError(f"Refusing to use a symlink as the DGSM data directory: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not path.is_dir():
+        raise MonitorError(f"DGSM data path is not a directory: {path}")
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+
+
+def _open_state_file(path: Path, mode: str):
+    """Open DGSM state files with POSIX 0600 permissions and no symlink following."""
+    path = Path(path)
+    if path.is_symlink():
+        raise OSError(f"Refusing to follow a symlink state file: {path}")
+    if mode == "r":
+        flags = os.O_RDONLY
+    elif mode == "a":
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    else:
+        raise ValueError("Unsupported DGSM state-file mode.")
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if os.name != "nt" and hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, mode, encoding="utf-8")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def append_telemetry_log(path: Path, measurement: dict[str, Any], max_bytes: int = 5_000_000) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     try:
         if path.exists() and path.stat().st_size > max_bytes:
             backup = path.with_suffix(".previous.jsonl")
@@ -1240,8 +1632,8 @@ def append_telemetry_log(path: Path, measurement: dict[str, Any], max_bytes: int
                 path.replace(backup)
             except OSError:
                 pass
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(measurement, ensure_ascii=False) + "\n")
+        with _open_state_file(path, "a") as handle:
+            handle.write(json.dumps(measurement, ensure_ascii=False, allow_nan=False) + "\n")
     except OSError as exc:
         print(f"Warning: could not write telemetry history: {exc}", file=sys.stderr)
 
@@ -1254,7 +1646,7 @@ def show_telemetry_history(path: Path, limit: int = 30) -> int:
         return 0
     rows: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _open_state_file(path, "r") as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
@@ -1267,9 +1659,13 @@ def show_telemetry_history(path: Path, limit: int = 30) -> int:
         return 1
     for sample in rows:
         summary = sample.get("summary") if isinstance(sample.get("summary"), dict) else {}
-        median = summary.get("median_ms")
-        latency = f"{median:.1f} ms median" if isinstance(median, (int, float)) else "no latency summary"
-        print(f"[{sample.get('completed_at', '?')}] {str(sample.get('type', '?')).upper():<10} {sample.get('target', '?'):<36} {latency}; probes={sample.get('probes_count', 0)}")
+        median = numeric(summary.get("median_ms"))
+        latency = f"{median:.1f} ms median" if median is not None else "no latency summary"
+        stamp = clip(sample.get("completed_at", "?"), 32)
+        test_type = clip(sample.get("type", "?"), 10).upper()
+        target = clip(sample.get("target", "?"), 36)
+        probes = numeric(sample.get("probes_count")) or 0
+        print(f"[{stamp}] {test_type:<10} {target:<36} {latency}; probes={probes:.0f}")
     return 0
 
 
@@ -1482,23 +1878,40 @@ def detect_changes(previous: Optional[dict[str, Any]], current: dict[str, Any]) 
 
 def load_json_file(path: Path) -> Optional[dict[str, Any]]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with _open_state_file(path, "r") as handle:
+            data = json.load(handle)
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
 def save_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    temp.replace(path)
+    """Atomically write state through a unique private temporary file."""
+    ensure_private_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    descriptor_open = True
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor_open = False
+            handle.write(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if descriptor_open:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
 
 
 def append_event_log(path: Path, events: list[str], max_bytes: int = 2_000_000) -> None:
     if not events:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     try:
         if path.exists() and path.stat().st_size > max_bytes:
             backup = path.with_suffix(".previous.jsonl")
@@ -1508,9 +1921,11 @@ def append_event_log(path: Path, events: list[str], max_bytes: int = 2_000_000) 
                 path.replace(backup)
             except OSError:
                 pass
-        with path.open("a", encoding="utf-8") as handle:
+        with _open_state_file(path, "a") as handle:
             for event in events:
-                handle.write(json.dumps({"time": iso_now(), "event": event}, ensure_ascii=False) + "\n")
+                handle.write(json.dumps({
+                    "time": iso_now(), "event": clip(event, 2000)
+                }, ensure_ascii=False, allow_nan=False) + "\n")
     except OSError as exc:
         print(f"Warning: could not write event log: {exc}", file=sys.stderr)
 
@@ -1520,7 +1935,7 @@ def read_event_log(path: Path, limit: int = 25) -> list[dict[str, Any]]:
         return []
     rows: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _open_state_file(path, "r") as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
@@ -1779,9 +2194,28 @@ def render_dashboard(
                         out.append(f"      {label} median: {statistics.median(samples):.1f} ms")
             if kind == "dns" and measurement.get("rows"):
                 for dns_row in measurement["rows"][:5]:
-                    answers = dns_row.get("answers") if isinstance(dns_row, dict) else None
-                    if answers:
-                        out.append(f"      {clip(dns_row.get('location', 'remote probe'), 25):<25} {', '.join(answers[:4])}")
+                    if not isinstance(dns_row, dict):
+                        continue
+                    answers = dns_row.get("answers")
+                    answers = answers if isinstance(answers, list) else []
+                    answer_text = ", ".join(clip(answer, 64) for answer in answers[:8])
+                    if len(answers) > 8:
+                        answer_text += f", +{len(answers) - 8} more"
+                    if not answer_text:
+                        answer_text = clip(dns_row.get("detail", "no DNS answer"), 100)
+                    state = clip(dns_row.get("state", "WARN"), 8)
+                    out.append(
+                        f"      {clip(dns_row.get('location', 'remote probe'), 25):<25} "
+                        f"{clip(answer_text, 120)} [{state}]"
+                    )
+                if len(measurement.get("rows", [])) > 1:
+                    if summary.get("answer_set_consistent") is True:
+                        note = "same DNS answer set across probes (TTL cache ages may differ)"
+                    elif summary.get("answer_set_consistent") is False:
+                        note = "DNS answer sets vary by resolver/location; inspect regional results"
+                    else:
+                        note = "DNS answer-set comparison unavailable"
+                    out.append(f"      RRset comparison: {note}")
             if kind == "ping" and measurement.get("rows"):
                 by_continent: dict[str, list[float]] = {}
                 for item in measurement["rows"]:
@@ -1851,7 +2285,7 @@ def output_json(payload: Optional[dict[str, Any]], official_latency: Optional[fl
         "tls_verification": "enabled",
         "tls_trust_sources": list(_TLS_CA_SOURCES),
     }
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def show_history(path: Path) -> int:
@@ -1862,7 +2296,7 @@ def show_history(path: Path) -> int:
         print("No saved events yet.")
         return 0
     for row in rows:
-        print(f"[{row.get('time', '?')}] {row.get('event', '')}")
+        print(f"[{clip(row.get('time', '?'), 32)}] {clip(row.get('event', ''), 240)}")
     return 0
 
 
@@ -1874,7 +2308,7 @@ def main() -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         pass
-    data_dir = args.data_dir or state_directory()
+    data_dir = (args.data_dir or state_directory()).expanduser()
     state_path = data_dir / "last_state.json"
     event_path = data_dir / "events.jsonl"
     telemetry_path = data_dir / "worldwide_telemetry.jsonl"
@@ -1884,6 +2318,11 @@ def main() -> int:
     if args.telemetry_history:
         return show_telemetry_history(telemetry_path)
 
+    try:
+        ensure_private_directory(data_dir)
+    except Exception as exc:
+        print(f"Unsafe DGSM data directory: {exc}", file=sys.stderr)
+        return 2
     bootstrap_optional_dependencies(args, data_dir)
     try:
         initialize_tls_context(args.ca_bundle)

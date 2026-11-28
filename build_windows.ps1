@@ -609,7 +609,7 @@ $VersionModule = Join-Path $Root 'dgsm_version.py'
 $DllSmokeTest = Join-Path $Root 'dll_smoke_test.py'
 $ResourceEmbedder = Join-Path $Root 'embed_windows_resources.py'
 $LicenseFile = Join-Path $Root 'LICENSE'
-$ReleaseNotes = Join-Path $Root 'Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt'
+$ReleaseNotes = Join-Path $Root 'Discord_Global_Status_Monitor_v3.4.5_RELEASE_NOTES.txt'
 $BackendsDir = Join-Path $Root 'backends'
 foreach ($file in @($Source, $DllBuilder, $Header, $BuildRequirements, $IconPath, $IconPng, $IconRcTemplate, $VersionTemplateFile, $VersionModule, $DllSmokeTest, $ResourceEmbedder, $LicenseFile, $ReleaseNotes)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required source file is missing: $file" }

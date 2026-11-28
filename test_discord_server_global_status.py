@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline unit tests for Discord Global Status Monitor 3.4.4."""
+"""Offline unit tests for Discord Global Status Monitor 3.4.5."""
 
 import io
 import json
@@ -30,6 +30,22 @@ class FakeResponse:
 
 
 class TLSAndNetworkTests(unittest.TestCase):
+    def test_rest_gateway_probe_rejects_unexpected_websocket_hosts(self):
+        with mock.patch.object(
+            monitor, "request_json", return_value=({"url": "wss://evil.example"}, 1.0)
+        ):
+            result = monitor.probe_rest_api(2)
+        self.assertEqual(result.state, "WARN")
+        self.assertIn("invalid", result.detail)
+
+    def test_rest_gateway_probe_accepts_official_gateway_url(self):
+        with mock.patch.object(
+            monitor, "request_json", return_value=({"url": "wss://gateway.discord.gg"}, 1.0)
+        ):
+            result = monitor.probe_rest_api(2)
+        self.assertEqual(result.state, "UP")
+        self.assertIn("expected Discord Gateway URL", result.detail)
+
     def setUp(self):
         monitor._TLS_CONTEXT = None
         monitor._TLS_CA_SOURCES = []
@@ -76,9 +92,9 @@ class TLSAndNetworkTests(unittest.TestCase):
         monitor.initialize_tls_context()
         payload = {"status": {"indicator": "none"}, "components": []}
         with mock.patch.object(
-            monitor.urllib.request, "urlopen", return_value=FakeResponse(payload)
+            monitor, "safe_urlopen", return_value=FakeResponse(payload)
         ) as urlopen:
-            data, elapsed = monitor.request_json("https://unit.test/status", 2)
+            data, elapsed = monitor.request_json("https://discordstatus.com/api/v2/summary.json", 2)
         self.assertEqual(data, payload)
         self.assertGreaterEqual(elapsed, 0)
         self.assertIs(urlopen.call_args.kwargs["context"], monitor.tls_context())
@@ -87,40 +103,41 @@ class TLSAndNetworkTests(unittest.TestCase):
         monitor.initialize_tls_context()
         oversized = {"padding": "x" * (2 * 1024 * 1024)}
         with mock.patch.object(
-            monitor.urllib.request, "urlopen", return_value=FakeResponse(oversized)
+            monitor, "safe_urlopen", return_value=FakeResponse(oversized)
         ):
             with self.assertRaisesRegex(monitor.MonitorError, "exceeded the 2 MiB response safety limit"):
-                monitor.request_json("https://unit.test/status", 2)
+                monitor.request_json("https://discordstatus.com/api/v2/summary.json", 2)
 
     def test_globalping_get_retries_transient_network_failure(self):
         monitor.initialize_tls_context()
         payload = {"ok": True}
         responses = [urllib.error.URLError("temporary"), FakeResponse(payload)]
-        with mock.patch.object(monitor.urllib.request, "urlopen", side_effect=responses) as urlopen, \
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=responses) as urlopen, \
              mock.patch.object(monitor.time, "sleep"):
-            result, _headers = monitor.globalping_request("GET", "https://unit.test", 2)
+            result, _headers = monitor.globalping_request("GET", "https://api.globalping.io/v1/limits", 2)
         self.assertEqual(result, payload)
         self.assertEqual(urlopen.call_count, 2)
 
     def test_globalping_post_is_not_retried(self):
         monitor.initialize_tls_context()
         with mock.patch.object(
-            monitor.urllib.request, "urlopen", side_effect=urllib.error.URLError("temporary")
+            monitor, "safe_urlopen", side_effect=urllib.error.URLError("temporary")
         ) as urlopen:
             with self.assertRaises(monitor.MonitorError):
-                monitor.globalping_request("POST", "https://unit.test", 2, payload={"type": "ping"})
+                monitor.globalping_request("POST", "https://api.globalping.io/v1/measurements", 2, payload={"type": "ping"})
         self.assertEqual(urlopen.call_count, 1)
 
     def test_globalping_429_surfaces_retry_after_without_retry_storm(self):
         monitor.initialize_tls_context()
         error = urllib.error.HTTPError(
-            "https://unit.test", 429, "Too Many Requests",
+            "https://api.globalping.io/v1/limits", 429, "Too Many Requests",
             {"Retry-After": "60"}, io.BytesIO(b'{"error":{"message":"limit reached"}}')
         )
-        with mock.patch.object(monitor.urllib.request, "urlopen", side_effect=error) as urlopen:
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=error) as urlopen:
             with self.assertRaisesRegex(monitor.MonitorError, "Retry-After=60"):
-                monitor.globalping_request("GET", "https://unit.test", 2)
+                monitor.globalping_request("GET", "https://api.globalping.io/v1/limits", 2)
         self.assertEqual(urlopen.call_count, 1)
+        self.assertTrue(error.fp.closed)
 
     def test_version_comparison_recognizes_stale_ca_bundle(self):
         minimum = monitor._version_tuple("2026.11.20")
@@ -129,6 +146,17 @@ class TLSAndNetworkTests(unittest.TestCase):
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_optional_runtime_installation_is_opt_in(self):
+        with mock.patch("sys.argv", ["dgsm", "--no-globalping", "--no-probes"]):
+            args = monitor.parse_args()
+        self.assertFalse(args.auto_install)
+        self.assertTrue(args.no_auto_install)
+
+        with mock.patch("sys.argv", ["dgsm", "--auto-install", "--no-globalping", "--no-probes"]):
+            opted_in = monitor.parse_args()
+        self.assertTrue(opted_in.auto_install)
+        self.assertFalse(opted_in.no_auto_install)
+
     def test_ripe_atlas_measurement_ids_are_read_from_environment(self):
         with mock.patch.dict("os.environ", {"RIPE_ATLAS_MEASUREMENT_IDS": "12345,67890"}, clear=True), \
              mock.patch("sys.argv", ["dgsm", "--no-globalping", "--no-probes"]):
@@ -273,8 +301,12 @@ class TelemetryTests(unittest.TestCase):
             "results": [{"probe": {}, "result": {"statusCode": 0, "statusCodeName": "NOERROR", "answers": []}}]
         }
         normalized = monitor.normalize_globalping_result("dns", "example.invalid", data)
-        self.assertEqual(normalized["rows"][0]["state"], "UP")
-        self.assertEqual(normalized["rows"][0]["detail"], "DNS NOERROR; 0 answer(s)")
+        self.assertEqual(normalized["rows"][0]["state"], "WARN")
+        self.assertEqual(normalized["rows"][0]["dns_answer_state"], "NODATA")
+        self.assertEqual(
+            normalized["rows"][0]["detail"],
+            "DNS NOERROR/NODATA; resolver responded; 0 record(s), 0 A/AAAA address answer(s)",
+        )
 
     def test_globalping_dns_nxdomain_remains_warning(self):
         data = {
@@ -282,6 +314,164 @@ class TelemetryTests(unittest.TestCase):
         }
         normalized = monitor.normalize_globalping_result("dns", "missing.discord.example", data)
         self.assertEqual(normalized["rows"][0]["state"], "WARN")
+
+    def test_globalping_dns_rrsets_are_order_independent_and_ttl_independent(self):
+        addresses = [
+            "162.159.135.234", "162.159.130.234",
+            "162.159.133.234", "162.159.134.234",
+        ]
+        def row(city, country, order, ttl):
+            return {
+                "probe": {"city": city, "country": country},
+                "result": {
+                    "statusCode": 0,
+                    "statusCodeName": "NOERROR",
+                    "answers": [
+                        {"name": "gateway.discord.gg.", "type": "A", "value": addresses[index], "ttl": ttl}
+                        for index in order
+                    ],
+                },
+            }
+        data = {
+            "status": "finished",
+            "results": [
+                row("Buffalo", "US", [0, 1, 2, 3], 139),
+                row("Los Angeles", "US", [3, 0, 2, 1], 300),
+                row("Sydney", "AU", [2, 1, 0, 3], 300),
+                row("Lagos", "NG", [0, 3, 2, 1], 175),
+                row("Sao Paulo", "BR", [1, 2, 3, 0], 86),
+            ],
+        }
+        normalized = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)
+        self.assertEqual(normalized["summary"]["unique_answer_sets"], 1)
+        self.assertTrue(normalized["summary"]["answer_set_consistent"])
+        self.assertEqual(normalized["summary"]["resolved"], 5)
+        self.assertEqual(normalized["summary"]["warn"], 0)
+        expected = sorted(f"gateway.discord.gg. A {ip}" for ip in addresses)
+        for dns_row in normalized["rows"]:
+            self.assertEqual(dns_row["state"], "UP")
+            self.assertEqual(dns_row["answer_set"], expected)
+            self.assertEqual(len(dns_row["answers"]), 4)
+            self.assertIn("TTL", dns_row["answers"][0])
+        self.assertEqual(
+            [item["ttl_min"] for item in normalized["rows"]],
+            [139, 300, 300, 175, 86],
+        )
+
+    def test_globalping_dns_accepts_addresses_reached_through_cname_chain(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "CNAME", "ttl": 120,
+                     "value": "gateway.edge.example.net."},
+                    {"name": "gateway.edge.example.net.", "type": "A", "ttl": 90,
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "UP")
+        self.assertEqual(row["address_answers"], ["162.159.135.234"])
+
+    def test_globalping_dns_rejects_unrelated_address_records(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "unrelated.example.", "type": "A", "ttl": 60,
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["address_answer_count"], 0)
+        self.assertEqual(row["unrelated_address_answers"], 1)
+
+    def test_globalping_dns_missing_ttl_is_warned(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "A",
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["missing_ttls"], 1)
+
+    def test_globalping_dns_invalid_a_record_is_ignored_and_warned(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "A", "ttl": 60, "value": "not-an-ip"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["answer_count"], 0)
+        self.assertEqual(row["invalid_records"], 1)
+
+    def test_globalping_dns_ttl_conflict_is_reported(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "A", "ttl": 60, "value": "162.159.135.234"},
+                    {"name": "gateway.discord.gg.", "type": "A", "ttl": 90, "value": "162.159.130.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["ttl_conflicts"], 1)
+        self.assertIn("inconsistent TTLs", row["detail"])
+
+    def test_globalping_dns_servfail_is_down(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {"statusCode": 2, "statusCodeName": "SERVFAIL", "answers": []},
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "DOWN")
+
+    def test_globalping_dns_result_count_is_bounded(self):
+        data = {"results": [
+            {"probe": {}, "result": {"statusCode": 0, "answers": [
+                {"name": "gateway.discord.gg.", "type": "A", "ttl": 60, "value": "162.159.135.234"}
+            ]}}
+            for _ in range(monitor.MAX_GLOBALPING_RESULT_ROWS + 1)
+        ]}
+        normalized = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)
+        self.assertEqual(len(normalized["rows"]), monitor.MAX_GLOBALPING_RESULT_ROWS)
+        self.assertTrue(normalized["results_truncated"])
+
+    def test_numeric_rejects_non_finite_negative_and_boolean_values(self):
+        for value in (float("nan"), float("inf"), float("-inf"), -1, True, False):
+            self.assertIsNone(monitor.numeric(value))
+        self.assertEqual(monitor.numeric(0), 0.0)
+
+    def test_clip_removes_terminal_and_bidi_control_injection(self):
+        value = "clean\x1b[31mRED\x1b[0m\x1b]0;title\x07\u202ehidden"
+        output = monitor.clip(value, 200)
+        self.assertEqual(output, "cleanREDhidden")
+        self.assertNotIn("\x1b", output)
+        self.assertNotIn("\u202e", output)
 
     def test_bad_component_position_does_not_crash(self):
         groups, standalone = monitor.component_groups([
@@ -308,6 +498,60 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(any("Global status" in change for change in changes))
         self.assertTrue(any("Component" in change for change in changes))
         self.assertTrue(any("NEW INCIDENT" in change for change in changes))
+
+
+class SecureTransportTests(unittest.TestCase):
+    def test_safe_urlopen_rejects_http_and_unallowlisted_hosts(self):
+        from backends.http_transport import safe_urlopen
+        context = ssl.create_default_context()
+        with mock.patch("backends.http_transport.urllib.request.build_opener") as build:
+            with self.assertRaisesRegex(ValueError, "Only absolute HTTPS"):
+                safe_urlopen("http://api.globalping.io/v1/limits", timeout=1, context=context,
+                             allowed_hosts={"api.globalping.io"})
+            with self.assertRaisesRegex(ValueError, "not in the allowed host list"):
+                safe_urlopen("https://evil.example/", timeout=1, context=context,
+                             allowed_hosts={"api.globalping.io"})
+            build.assert_not_called()
+
+    def test_redirect_handler_blocks_cross_origin_and_http_redirects(self):
+        from backends.http_transport import SameOriginHTTPSRedirectHandler
+        handler = SameOriginHTTPSRedirectHandler(("api.globalping.io", 443))
+        request = monitor.urllib.request.Request(
+            "https://api.globalping.io/v1/limits",
+            headers={"Authorization": "Bearer do-not-leak"},
+        )
+        cross_origin_response = io.BytesIO()
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(
+                request, cross_origin_response, 302, "Found", {}, "https://evil.example/collect"
+            )
+        self.assertTrue(cross_origin_response.closed)
+
+        downgrade_response = io.BytesIO()
+        with self.assertRaises(urllib.error.HTTPError):
+            handler.redirect_request(
+                request, downgrade_response, 302, "Found", {}, "http://api.globalping.io/v1/limits"
+            )
+        self.assertTrue(downgrade_response.closed)
+
+    def test_redirect_handler_allows_same_origin_https_get(self):
+        from backends.http_transport import SameOriginHTTPSRedirectHandler
+        handler = SameOriginHTTPSRedirectHandler(("api.globalping.io", 443))
+        request = monitor.urllib.request.Request("https://api.globalping.io/v1/limits")
+        redirected = handler.redirect_request(
+            request, io.BytesIO(), 302, "Found", {}, "https://api.globalping.io/v1/status"
+        )
+        self.assertEqual(redirected.full_url, "https://api.globalping.io/v1/status")
+        self.assertEqual(redirected.get_method(), "GET")
+
+    def test_globalping_url_and_path_are_allowlisted_before_network(self):
+        monitor.initialize_tls_context()
+        with mock.patch.object(monitor, "safe_urlopen") as opener:
+            with self.assertRaisesRegex(monitor.MonitorError, "official api.globalping.io HTTPS origin"):
+                monitor.globalping_request("GET", "https://evil.example/v1/limits", 2)
+            with self.assertRaisesRegex(monitor.MonitorError, "allowed DGSM endpoint"):
+                monitor.globalping_request("GET", "https://api.globalping.io/v1/measurements/../../secrets", 2)
+            opener.assert_not_called()
 
 
 class GlobalpingRequestSchemaTests(unittest.TestCase):
@@ -388,7 +632,7 @@ class GlobalpingRequestSchemaTests(unittest.TestCase):
             {},
             io.BytesIO(body),
         )
-        with mock.patch.object(monitor.urllib.request, "urlopen", side_effect=error):
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=error):
             with self.assertRaises(monitor.MonitorError) as caught:
                 monitor.globalping_request(
                     "POST", "https://api.globalping.io/v1/measurements", 5,
@@ -398,6 +642,36 @@ class GlobalpingRequestSchemaTests(unittest.TestCase):
         self.assertIn("target", str(caught.exception))
         self.assertIn("hostname or IP address", str(caught.exception))
 
+
+
+class StateFileSecurityTests(unittest.TestCase):
+    def test_atomic_state_write_is_private_and_leaves_no_fixed_temp_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir) / "dgsm"
+            monitor.ensure_private_directory(directory)
+            path = directory / "state.json"
+            monitor.save_json_atomic(path, {"ready": True})
+            self.assertEqual(monitor.load_json_file(path), {"ready": True})
+            self.assertEqual(list(directory.glob("*.tmp")), [])
+            if __import__("os").name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+
+    def test_state_file_symlink_is_not_followed(self):
+        if not hasattr(Path, "symlink_to"):
+            self.skipTest("symlinks are unavailable")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            secret = root / "outside.txt"
+            secret.write_text("unchanged", encoding="utf-8")
+            link = root / "state.json"
+            try:
+                link.symlink_to(secret)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlink creation is not permitted")
+            with self.assertRaises(OSError):
+                monitor._open_state_file(link, "r")
+            self.assertEqual(secret.read_text(encoding="utf-8"), "unchanged")
 
 
 class RipeAtlasBackendTests(unittest.TestCase):
@@ -430,6 +704,13 @@ class RipeAtlasBackendTests(unittest.TestCase):
         self.assertAlmostEqual(row["loss_pct"], 100 / 3)
         self.assertAlmostEqual(normalized["summary"]["median_ms"], 21.0)
 
+    def test_ripe_atlas_api_key_rejects_header_injection_before_network(self):
+        from backends.ripe_atlas import BackendError, _get_json
+        with mock.patch("backends.ripe_atlas.safe_urlopen") as opener:
+            with self.assertRaisesRegex(BackendError, "invalid characters"):
+                _get_json(12345, 5, ssl.create_default_context(), "secret\r\nInjected: yes")
+            opener.assert_not_called()
+
     def test_latest_results_dict_shape_is_normalized_by_probe_id(self):
         from backends.ripe_atlas import _get_json
         payload = {
@@ -444,7 +725,7 @@ class RipeAtlasBackendTests(unittest.TestCase):
         }
         response = FakeResponse(payload)
         context = ssl.create_default_context()
-        with mock.patch("backends.ripe_atlas.urllib.request.urlopen", return_value=response) as urlopen:
+        with mock.patch("backends.ripe_atlas.safe_urlopen", return_value=response) as urlopen:
             rows = _get_json(9988, 5, context)
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[0]["prb_id"], "1001")
@@ -620,9 +901,9 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
         root = Path(__file__).parent
         version = (root / "dgsm_version.py").read_text(encoding="utf-8")
         project = (root / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('__version__ = "3.4.4"', version)
-        self.assertIn('__version_info__ = (3, 4, 4)', version)
-        self.assertIn('version = "3.4.4"', project)
+        self.assertIn('__version__ = "3.4.5"', version)
+        self.assertIn('__version_info__ = (3, 4, 5)', version)
+        self.assertIn('version = "3.4.5"', project)
         self.assertIn("@DGSM_VERSION_TUPLE@", (root / "assets" / "version_info.txt").read_text(encoding="utf-8"))
         self.assertIn("@DGSM_VERSION_COMMA4@", (root / "assets" / "DGSM.rc").read_text(encoding="utf-8"))
 

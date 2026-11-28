@@ -1,4 +1,5 @@
-# The Python script installs these automatically into a private app-local folder.
+# Optional integrations. Install explicitly with --auto-install or pip install -r requirements-optional.txt.
+# Runtime auto-install is disabled by default; core monitoring has standard-library fallbacks.
 plyer>=2.1.0
 dnspython>=2.7.0
 psutil>=6.0.0

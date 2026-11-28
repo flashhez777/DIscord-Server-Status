@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "discord-global-status-monitor"
-version = "3.4.4"
+version = "3.4.5"
 description = "Cross-platform worldwide Discord public service health and network telemetry monitor"
 readme = "README.md"
 requires-python = ">=3.9"

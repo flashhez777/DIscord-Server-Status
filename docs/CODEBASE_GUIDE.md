@@ -1,6 +1,6 @@
-# DGSM 3.4.4 — Annotated Codebase Guide
+# DGSM 3.4.5 — Annotated Codebase Guide
 
-This guide maps the implementation that exists in the 3.4.4 source tree. It is intended for maintainers reviewing changes, diagnosing failures, or adding a new global telemetry provider.
+This guide maps the implementation that exists in the 3.4.5 source tree. It is intended for maintainers reviewing changes, diagnosing failures, or adding a new global telemetry provider.
 
 ## 1. Project contract and measurement model
 
@@ -23,7 +23,7 @@ The Statuspage is the authoritative *published service-health feed*. Globalping 
 The primary entry point is `discord_server_global_status.py:main()`.
 
 1. `parse_args()` validates the CLI, interval floors, probe counts, RIPE Atlas IDs, and a conservative estimate of Globalping usage.
-2. DGSM resolves a per-user state directory (or `--data-dir` override), then optionally bootstraps quality-of-life packages into a private `vendor/` directory. It does not modify system Python packages.
+2. DGSM resolves a per-user state directory (or `--data-dir` override) and secures its private state/vendor directories. Optional packages are installed only when `--auto-install` is explicitly supplied; the installer uses HTTPS PyPI and binary wheels.
 3. `initialize_tls_context()` builds a verified TLS context. Hostname checks and certificate verification remain enabled; an additional PEM bundle may extend trust.
 4. The official Statuspage feed and local probes are collected concurrently. Changes are compared with the prior snapshot, logged, and optionally notified.
 5. Periodic Globalping jobs run in a bounded executor. They do not block the normal dashboard while remote probes are pending.
@@ -35,20 +35,21 @@ For `--once` and `--json`, the monitor waits for the measurements explicitly req
 
 ## 3. Main application: `discord_server_global_status.py`
 
-This module is intentionally the coordinator and user interface; provider-specific RIPE Atlas HTTP/result handling lives in `backends/ripe_atlas.py`.
+This module is intentionally the coordinator and user interface. Shared HTTPS policy lives in `backends/http_transport.py`; provider-specific RIPE Atlas HTTP/result handling lives in `backends/ripe_atlas.py`.
 
 | Area | Important functions | Responsibility |
 |---|---|---|
 | CLI and paths | `parse_args()`, `state_directory()` | Options, validation, per-user state location |
 | Optional runtime | `bootstrap_optional_dependencies()`, `_module_satisfies()` | Private optional package installation and graceful fallbacks |
 | TLS and diagnostics | `initialize_tls_context()`, `tls_context()`, `tls_failure_message()`, `run_doctor()` | Verified trust context and actionable diagnostics |
+| HTTPS transport | `backends/http_transport.py:safe_urlopen()` | HTTPS-only, host-allowlisted requests and same-origin GET/HEAD redirect policy |
 | HTTP/status source | `request_json()`, `fetch_official_summary()` | Bounded JSON HTTP access and official Statuspage summary |
 | Local connectivity | `probe_rest_api()`, `probe_gateway_websocket()`, `probe_cdn()`, `probe_local_dns()`, `run_local_probes()` | Host-local Discord endpoint checks |
-| Globalping | `globalping_request()`, `fetch_globalping_limits()`, `build_globalping_measurement_payload()`, `create_globalping_measurement()`, `normalize_globalping_result()`, `run_global_telemetry()` | Remote probe requests, quota awareness, payload construction, normalization |
+| Globalping | `globalping_request()`, `fetch_globalping_limits()`, `build_globalping_measurement_payload()`, `create_globalping_measurement()`, `normalize_dns_answers()`, `normalize_globalping_result()`, `run_global_telemetry()` | Remote probe requests, quota awareness, payload construction, normalization |
 | RIPE Atlas bridge | `run_ripe_atlas()` | Calls the optional backend and keeps it separate from Globalping |
 | Host metrics | `local_network_counters()`, `calculate_local_network_rates()` | Local interface counters and rate deltas |
 | Status model | `build_snapshot()`, `detect_changes()`, `component_groups()` | Normalized status snapshot and change detection |
-| Persistence | `load_json_file()`, `save_json_atomic()`, `append_event_log()`, `append_telemetry_log()` | Atomic state snapshot and bounded event/telemetry history |
+| Persistence | `load_json_file()`, `save_json_atomic()`, `append_event_log()`, `append_telemetry_log()` | Unique atomic writes, private permissions, symlink rejection and bounded history |
 | Presentation | `render_dashboard()`, `output_json()`, `show_history()`, `show_telemetry_history()` | Human-readable dashboard and machine-readable output |
 | Orchestration | `main()` | Worker scheduling, lifecycle, persistence, notifications, and exit status |
 
@@ -125,11 +126,13 @@ The RC template uses `1 VERSIONINFO`, not a string-named `VS_VERSION_INFO`, to p
 
 - `TLSAndNetworkTests` — verified TLS invariants, CA bundle handling, bounded Statuspage responses, retry behavior, and rate-limit handling.
 - `TelemetryTests` — CLI/RIPE Atlas wiring, JSON one-shot behavior, latency summaries, DNS normalization, and status change handling.
+- `SecureTransportTests` — HTTPS allowlists and same-origin redirect enforcement.
 - `GlobalpingRequestSchemaTests` — Globalping HTTP target/options validation and request payload shape.
+- `StateFileSecurityTests` — private permissions, atomic writes and symlink rejection.
 - `RipeAtlasBackendTests` — measurement ID validation, latest-result normalization, and read-only collection.
 - `WindowsBuildBootstrapTests` — Windows Python/toolchain/signing/resource/packaging contracts and cross-platform build-script checks.
 
-The GitHub Actions workflow runs the offline suite on Windows and Ubuntu across CPython 3.11–3.15, builds a wheel in the test matrix, and has native Linux and Windows artifact jobs. The Windows CI job explicitly uses `-SkipSigning`: a successful CI build is not evidence that a CA-trusted Authenticode release was produced.
+The GitHub Actions workflow runs the offline suite on Windows and Ubuntu across CPython 3.11–3.15, builds a wheel, runs pip-audit against build/optional dependencies and builds native Linux/Windows artifacts. Windows CI produces development-signed EXE/DLL files with an ephemeral self-signed certificate; that does not establish public publisher trust. The tag-triggered release workflow can use a protected CA-issued PFX when configured.
 
 Offline tests do not replace live provider validation, a real Windows resource-update execution, native target-host testing, or public-certificate signing.
 

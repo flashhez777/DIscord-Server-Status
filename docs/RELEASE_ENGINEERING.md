@@ -1,13 +1,13 @@
-# DGSM 3.4.4 — Release Engineering and CI Notes
+# DGSM 3.4.5 — Release Engineering and CI Notes
 
 This document describes how the repository currently builds and validates artifacts. It distinguishes source tests, target-native compilation, local development signing, and public publisher trust.
 
 ## 1. Version discipline
 
-`dgsm_version.py` is the canonical version source. For DGSM 3.4.4 it exports:
+`dgsm_version.py` is the canonical version source. For DGSM 3.4.5 it exports:
 
-- `__version__ = "3.4.4"`
-- `__version_info__ = (3, 4, 4)`
+- `__version__ = "3.4.5"`
+- `__version_info__ = (3, 4, 5)`
 
 Windows resource templates, the EXE, DLL, native build metadata, and package metadata must agree with this source. `pyproject.toml` also declares the package version; update it in the same versioned change and add matching release notes.
 
@@ -19,19 +19,20 @@ Workflow: `.github/workflows/ci.yml`
 |---|---|---|
 | Offline tests | Ubuntu and Windows; CPython 3.11, 3.12, 3.13, 3.14, 3.15 | Compile key Python modules, run unittest regression suite, build a wheel |
 | Linux native build | Ubuntu; CPython 3.13 | Check shell syntax, build zipapp and C ABI shared object, smoke-test artifacts, upload Linux artifact |
-| Windows native build | Windows; CPython 3.15 | Parse PowerShell scripts, build EXE and C ABI DLL, upload Windows artifact |
+| Dependency audit | Ubuntu; supported dependency manifests | Run pip-audit against build and optional runtime dependency sets |
+| Windows native build | Windows; CPython 3.15 | Parse PowerShell scripts, build and Authenticode-sign EXE/C ABI DLL with development cert, upload report/certificate |
 
 The test matrix contains ten OS/Python combinations (two operating systems multiplied by five Python versions). The native Linux and Windows build jobs depend on the offline test matrix.
 
 ### CI signing limitation
 
-The Windows workflow runs:
+The Windows CI workflow runs the default signing path:
 
 ```powershell
-.\build_windows.ps1 -NoToolchainInstall -SkipSigning
+.\build_windows.ps1 -NoToolchainInstall
 ```
 
-The uploaded artifact is therefore named `DGSM-Windows-x64-unsigned-CI`. It is a useful native build output, not a publicly signed release. The Linux CI build also sets `DGSM_SKIP_SIGNING=1`. Never describe either CI artifact as CA-signed.
+It creates and verifies a local self-signed development certificate, then includes the public certificate and signing report with the EXE, DLL and ZIP. The artifact is named `DGSM-Windows-x64-development-signed-CI`. This is a valid local development signature, not a publicly trusted publisher identity or SmartScreen reputation. The Linux CI job sets `DGSM_SKIP_SIGNING=1`; the versioned release workflow signs the Linux files with a temporary development key and includes its public certificate and detached signatures.
 
 ## 3. Windows developer build
 
@@ -101,20 +102,32 @@ Before publishing a versioned GitHub Release:
 
 - [ ] Confirm the canonical version, package version, and release-notes filename agree.
 - [ ] Review the diff and run the offline regression suite.
-- [ ] Confirm the current main-branch CI run succeeds.
+- [ ] Confirm the current main-branch CI run succeeds, including the dependency vulnerability audit.
 - [ ] Build each native artifact on its target OS; do not infer Windows behavior from Linux or vice versa.
-- [ ] On Windows, verify version resources, all C ABI exports, Authenticode signatures, post-sign smoke tests, and the signing report.
+- [ ] On Windows, verify version resources, all C ABI exports, Authenticode signatures, post-sign smoke tests, and the signing report. Label a self-signed development certificate accurately; configure a CA-issued PFX for a publicly trusted publisher signature.
 - [ ] On Linux, record the interpreter/ABI details and verify the zipapp/shared-library smoke tests and checksum/signature outputs.
 - [ ] Compute SHA-256 hashes for the exact final files; do not reuse hashes from an earlier build.
 - [ ] Attach the release ZIP, separately useful binaries/source support files, release notes, checksums, and signing report as appropriate.
-- [ ] Label unsigned artifacts unambiguously. Never call CI's `-SkipSigning` output signed.
+- [ ] Label unsigned artifacts unambiguously. The Linux CI artifact remains unsigned. The Windows CI artifact is development-signed with a self-signed certificate, not publicly trusted.
 - [ ] Create a version tag that points at the exact reviewed commit and verify the tag/asset association after publishing.
 
 An annotated Git tag can be created from the checked-out release commit with:
 
 ```bash
-git tag -a v3.4.4 -m "DGSM 3.4.4"
-git push origin v3.4.4
+# Option A: publish from the dedicated version branch after merge.
+git switch -c release/v3.4.5
+git push origin release/v3.4.5
+
+# Option B: publish from an annotated version tag.
+git tag -a v3.4.5 -m "DGSM 3.4.5"
+git push origin v3.4.5
+
+Either verified ref triggers `.github/workflows/release.yml`. It audits
+dependencies, rebuilds Windows/Linux artifacts, and creates a GitHub Release
+with the ZIPs, standalone binaries, checksums, signing reports and release
+notes. Set protected repository secrets `DGSM_PFX_BASE64` and
+`DGSM_PFX_PASSWORD` to sign Windows binaries with a CA-issued publisher PFX;
+without them, Windows uses a self-signed development certificate.
 ```
 
 Use a new semantic version and matching tag for subsequent releases; do not move an existing published version tag to different source content.
@@ -139,5 +152,7 @@ CI artifacts are temporary workflow outputs. A GitHub Release asset is a separat
 - Linux artifact details: `README_Linux_Artifacts.txt`
 - Data-source boundaries: `BACKENDS.txt`
 - Security policy: `SECURITY.md`
-- Current versioned notes: `Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt`
+- Current versioned notes: `Discord_Global_Status_Monitor_v3.4.5_RELEASE_NOTES.txt`
+- Security/release checklist: `docs/SECURITY_AND_RELEASE_CHECKLIST.md`
+- Tag-triggered publication workflow: `.github/workflows/release.yml`
 - CI definition: `.github/workflows/ci.yml`

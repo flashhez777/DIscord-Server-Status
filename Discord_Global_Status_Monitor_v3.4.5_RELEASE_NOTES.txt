@@ -1,0 +1,75 @@
+DGSM 3.4.5 RELEASE NOTES
+==============================
+
+Release focus
+-------------
+DNS correctness, network transport security, runtime input validation, and
+safer local state handling.
+
+DNS / Globalping corrections
+----------------------------
+- Normalize DNS answers into deterministic, de-duplicated record sets.
+  Record ordering no longer changes the identity of an RRset.
+- Compare address answer sets across remote locations without treating normal
+  resolver cache TTL differences as DNS inconsistency.
+- Preserve per-record TTL values for inspection and show the full sorted
+  answer set (bounded to the first eight displayed records per probe).
+- Distinguish resolver response from successful address resolution:
+  NOERROR with no A/AAAA address answer is reported as NODATA/WARN;
+  SERVFAIL is DOWN; NXDOMAIN remains WARN.
+- Validate A/AAAA address-family values and TTL bounds, detect inconsistent
+  TTLs within one RRset, de-duplicate duplicate answers and cap untrusted
+  result/answer counts.
+- Add a regional RRset consistency summary that deliberately ignores TTL.
+
+Network security
+----------------
+- Add an allowlisted HTTPS transport for the Discord Statuspage, Discord API,
+  Discord CDN, Globalping and RIPE Atlas endpoints.
+- Reject plaintext HTTP, embedded URL credentials, non-standard HTTPS ports,
+  unapproved hosts and unsafe endpoint paths.
+- Permit only same-origin HTTPS GET/HEAD redirects. Cross-origin, downgrade
+  and mutating redirects are rejected so bearer/API credentials cannot be
+  forwarded to another host.
+- Validate Globalping request methods, endpoint paths, measurement IDs,
+  token headers and JSON payloads; do not retry measurement-creation POSTs.
+- Harden RIPE Atlas measurement ID parsing and reject malformed, oversized
+  or non-finite metrics.
+
+Runtime / local data safety
+---------------------------
+- Disable automatic optional package installation by default. Use
+  --auto-install to explicitly opt in; installation uses HTTPS PyPI and
+  binary wheels only. Core monitoring retains standard-library fallbacks.
+- Sanitize terminal output against ANSI/OSC escape and bidirectional-control
+  injection from remote provider fields.
+- Create private POSIX state/vendor directories (0700) and state files (0600),
+  refuse symlink state files, and use unique fsynced atomic state-file writes.
+- Reject NaN, infinity, negative latency/TTL-like metrics and boolean values
+  where numeric telemetry is expected.
+- Add regression coverage for DNS RRset permutations, differing TTLs, NODATA,
+  SERVFAIL, malformed addresses, TTL conflicts, API redirect policy,
+  argument/input validation and local state-file handling.
+
+Build / packaging
+-----------------
+- Canonical application and Python package version: 3.4.5.
+- Windows x64 EXE and Python-backed C ABI DLL remain separate artifacts.
+- Native Windows CI package is signed with an ephemeral self-signed
+  development certificate and includes its public certificate and signing
+  report. This signature is useful for integrity testing but is NOT a
+  publicly trusted publisher identity and does NOT confer SmartScreen
+  reputation.
+- A publicly trusted Windows publisher signature requires a CA-issued
+  code-signing PFX configured for the release workflow.
+- Linux native build and checksum/signature behavior is described in the
+  release engineering checklist.
+
+Validation
+----------
+Run the offline unittest suite on Windows and Linux for CPython 3.11-3.15,
+build the Python wheel, and run both native artifact jobs. A passing CI build
+does not replace local live-provider checks or target-machine verification.
+
+Scope remains global-only: no guild, bot, user-account or private Discord
+monitoring was added.
