@@ -90,6 +90,11 @@ def _get_json(
         "Cache-Control": "no-cache",
     }
     if api_key:
+        if (
+            not isinstance(api_key, str) or not api_key or len(api_key) > 8192
+            or "\\r" in api_key or "\\n" in api_key
+        ):
+            raise BackendError("RIPE Atlas API key contains invalid characters or exceeds the size limit.")
         headers["Authorization"] = f"Key {api_key}"
     request = urllib.request.Request(url, headers=headers, method="GET")
     started = time.perf_counter()
