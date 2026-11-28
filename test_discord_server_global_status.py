@@ -852,11 +852,15 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
             "CurrentUser\\My",
             "Cert:\\CurrentUser\\Root",
             "Cert:\\CurrentUser\\TrustedPublisher",
-            "New-SelfSignedCertificate",
-            "-Type CodeSigningCert",
-            "-KeyAlgorithm RSA",
-            "-KeyLength 3072",
-            "-HashAlgorithm SHA256",
+            "CertificateRequest]::new",
+            "RSACryptoServiceProvider",
+            "KeySize -ne 3072",
+            "HashAlgorithmName]::SHA256",
+            "X509KeyUsageFlags]::DigitalSignature",
+            "1.3.6.1.5.5.7.3.3",
+            "X509EnhancedKeyUsageExtension",
+            "X509KeyStorageFlags]::UserKeySet",
+            "X509KeyStorageFlags]::PersistKeySet",
             "timestamp.digicert.com",
             "timestamp.sectigo.com",
             "'verify', '/pa', '/all', '/v'",
@@ -864,6 +868,7 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
             "ZeroFreeBSTR",
         ):
             self.assertIn(required, signer)
+        self.assertNotIn("$certificate = New-SelfSignedCertificate", signer)
 
     def test_exe_and_dll_are_smoke_tested_then_signed(self):
         script = Path(__file__).with_name("build_windows.ps1").read_text(encoding="utf-8")
