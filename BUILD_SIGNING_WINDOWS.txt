@@ -68,8 +68,13 @@ SIGN
     prompted as a SecureString and cleared, or can be set via the protected
     DGSM_PFX_PASSWORD environment variable for CI automation.
   * Otherwise, create or reuse an RSA-3072 SHA-256 Code Signing certificate
-    in Cert:\CurrentUser\My. Export its public .cer and import it into only
-    Cert:\CurrentUser\Root and Cert:\CurrentUser\TrustedPublisher.
+    in Cert:\CurrentUser\My. New certificates are built with .NET
+    CertificateRequest and the RSA CryptoAPI provider rather than the
+    New-SelfSignedCertificate certificate-provider cmdlet, which has been
+    observed to block indefinitely on hosted Windows runners. The private key
+    is persisted through an in-memory, randomly passworded PFX; only the
+    public .cer is exported and imported into the current user's Root and
+    TrustedPublisher stores.
   * Sign both EXE and DLL with SHA-256 Authenticode.
   * Try the DigiCert and Sectigo RFC 3161 timestamp services in order. If both
     fail, retry signing without a timestamp and record the failure in the
