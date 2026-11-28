@@ -204,12 +204,6 @@ $pfxPassword = $null
 $signingMode = $null
 $certificate = $null
 $report = New-Object 'System.Collections.Generic.List[string]'
-# This handle is used only when converting a supplied PFX password. Initialize
-# it for the development-certificate path too, because cleanup runs under
-# Set-StrictMode -Version Latest for every signing mode.
-$bstr = [IntPtr]::Zero
-$pfxPassword = $null
-$securePassword = $null
 
 try {
     $validPaths = @($Paths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
