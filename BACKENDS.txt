@@ -1,4 +1,4 @@
-DGSM 3.4.1 - BACKEND ARCHITECTURE
+DGSM 3.4.4 - BACKEND ARCHITECTURE
 ================================
 
 SCOPE
@@ -47,18 +47,30 @@ API:
   https://atlas.ripe.net/api/v2/measurements/{measurement_id}/latest/?format=json
 
 DGSM requests the most recent result version per probe (up to a seven-day
-lookback), rather than downloading the full historical result set. Configure:
+lookback), rather than downloading the full historical result set. The main
+monitor invokes this backend only when operator-selected IDs are configured.
+It refreshes every 15 minutes by default on a dedicated worker, independent of
+Globalping scheduling. One-shot/JSON runs wait for the collection and include
+an explicit error record if the bounded wait expires. Configure:
   RIPE_ATLAS_MEASUREMENT_IDS=12345678,12345679
 
 or run:
   python discord_server_global_status.py --ripe-atlas-ids 12345678,12345679
+
+Disable it even when the environment has IDs:
+  python discord_server_global_status.py --no-ripe-atlas
 
 Optional API credential for authorized/private result access:
   RIPE_ATLAS_API_KEY=<api-key>
 
 Important:
   * The backend is READ-ONLY. It never creates or schedules measurements.
-  * It does not spend credits.
+  * It does not create measurements or spend measurement credits.
+  * The scheduler's default refresh is 900 seconds (15 minutes); the minimum
+    configurable interval is 300 seconds. A separate executor keeps Atlas
+    collection from occupying Globalping worker slots.
+  * Optional API keys are read only from the named environment variable and
+    are never copied into logs, JSON snapshots or dashboard text.
   * The IDs must refer to measurements that actually target Discord endpoints
     for the results to be relevant to Discord.
   * Public latest-result retrieval can be anonymous. Private results require

@@ -98,6 +98,11 @@ step 'Compiling the Linux C ABI shared library'
 cp "$ROOT/discord_server_global_status.py" "$DIST/"
 cp "$VERSION_MODULE" "$DIST/"
 cp "$ROOT/discord_global_status.h" "$DIST/"
+if [[ ! -f "$ROOT/LICENSE" ]]; then fail "Project license file is missing: $ROOT/LICENSE"; fi
+cp "$ROOT/LICENSE" "$DIST/"
+if [[ -f "$ROOT/Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt" ]]; then
+  cp "$ROOT/Discord_Global_Status_Monitor_v3.4.4_RELEASE_NOTES.txt" "$DIST/"
+fi
 rm -rf "$DIST/backends"
 mkdir -p "$DIST/backends"
 find "$ROOT/backends" -maxdepth 1 -type f -name '*.py' -exec cp -t "$DIST/backends" -- {} +

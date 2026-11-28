@@ -1,4 +1,4 @@
-DGSM 3.4.1 - WINDOWS BUILD AND SIGNING PIPELINE
+DGSM 3.4.4 - WINDOWS BUILD AND SIGNING PIPELINE
 ================================================
 
 PURPOSE
@@ -46,8 +46,12 @@ COMPILE
   * Generate PyInstaller and RC metadata from assets\version_info.txt and
     assets\DGSM.rc templates.
   * Build the console-mode, one-file EXE with PyInstaller and assets\DGSM.ico.
-  * Compile the DLL's icon and VS_VERSION_INFO resource with SDK rc.exe.
-  * Build the CFFI native library under VsDevCmd x64/MSVC, linking the .res.
+  * Compile the DLL icon and version resource with SDK rc.exe. The RC source must
+    use the standard numeric RT_VERSION name ordinal 1: `1 VERSIONINFO`.
+  * Build the CFFI native library under VsDevCmd x64/MSVC. After linking, apply the
+    .res through embed_windows_resources.py / Win32 UpdateResourceW; validate
+    RT_VERSION type 16/name 1, RT_GROUP_ICON type 14/name 1 and RT_ICON records
+    before reading DLL ProductVersion/FileDescription or signing.
   * Copy the companion source, version module, header and backends beside DLL.
   * Run EXE --help/--version and DLL C ABI smoke test before signing.
 

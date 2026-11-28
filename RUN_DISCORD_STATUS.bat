@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-title Discord Global Status Monitor v3.4.1
+title Discord Global Status Monitor v3.4.4
 
 rem Prefer a packaged standalone executable. This also supports running the
 rem source checkout after BUILD_AND_SIGN_WINDOWS.bat has populated dist\windows.

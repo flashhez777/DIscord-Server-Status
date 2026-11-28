@@ -1,10 +1,10 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0"
-title DGSM 3.4.1 - Automatic Windows EXE and DLL Builder
+title DGSM 3.4.4 - Automatic Windows EXE and DLL Builder
 
 echo ============================================================
-echo Discord Global Status Monitor 3.4.1
+echo Discord Global Status Monitor 3.4.4
 echo Automatic Python, MSVC, SDK, EXE, DLL and signing pipeline
 echo ============================================================
 echo.

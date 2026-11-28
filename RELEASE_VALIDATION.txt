@@ -1,58 +1,41 @@
-DGSM 3.4.1 - RELEASE VALIDATION
-================================
+DGSM 3.4.4 - SOURCE VALIDATION REPORT
+========================================
 
-SOURCE VALIDATION
------------------
-Offline regression suite: 56 tests passed (including RC2104 resource-template preflight).
-Python bytecode compilation: passed.
-Bash syntax validation (build_linux.sh, sign_linux.sh): passed.
-Linux launcher --version: passed.
-GitHub Actions YAML parsing: performed separately during package validation.
+LOCAL SOURCE VALIDATION
+-----------------------
+Offline regression suite: 69/69 passed.
+Python compileall / py_compile: passed.
+Bash syntax (build_linux.sh, sign_linux.sh, RUN_DISCORD_STATUS.sh): passed.
+GitHub Actions YAML parsing: passed.
+Python wheel build: passed (discord_global_status_monitor-3.4.4-py3-none-any.whl).
+Canonical version consistency (dgsm_version.py / pyproject.toml): 3.4.4.
+Resource regression coverage: numeric RT_VERSION ID 1 is required; string-named
+VS_VERSION_INFO resources are rejected before UpdateResourceW.
+Branch coverage: 48% in the offline test run. Lower-covered areas are primarily
+interactive dashboard, live network calls and platform-specific build paths.
 
-WINDOWS BUILD PIPELINE
-----------------------
-The Windows scripts now provide the D2 Damage Tracker-style sequence:
-Python runtime discovery/installation, isolated venv, dependency installation,
-MSVC/SDK resource compiler provisioning, one-file console EXE build, CFFI DLL
-build with embedded icon/version resources, pre-sign smoke tests, Authenticode
-signing, SignTool/AuthentiCode verification, post-sign smoke tests, Desktop
-shortcut, release manifest, archive validation and temporary cleanup.
+PLATFORM BUILD STATUS
+---------------------
+The current validation environment is Linux. The full Windows EXE/DLL
+compilation, Win32 UpdateResourceW execution, Authenticode signing, and
+post-sign smoke tests have not been executed during this source update.
+The source changes preserve the confirmed 3.4.3 numeric RT_VERSION fix and
+add a deterministic post-link resource update before version verification.
 
-Native Windows PE compilation and Authenticode signing were NOT executed in
-this Linux environment. BUILD_AND_SIGN_WINDOWS.bat must be run on Windows 10/11
-x64 to produce the signed Windows EXE and DLL. The source package contains the
-complete build/sign tooling, not precompiled Windows PE binaries.
+The release-conforming Linux .so build was not executed: this environment
+could not reach the package index to install the declared CFFI >= 2.1.1 build
+requirement. A prior local CFFI 2.0.0 shared-object test is not a release build.
+The source wheel and Python source checks are not substitutes for native builds.
 
-LINUX ARTIFACTS
----------------
-Target: x86-64 Linux, CPython 3.13.5, SOABI cpython-313-x86_64-linux-gnu.
-CFFI used for this local artifact: 2.0.0. The reproducible Linux build script
-installs the declared requirement CFFI >= 2.1.1 when network access is available.
-
-DiscordGlobalStatusMonitor.pyz --version: passed.
-DiscordGlobalStatusMonitor.pyz --help: passed.
-C ABI shared-library load/version/export smoke test: passed for the prior Linux build (3.4.0); rebuild with build_linux.sh to produce 3.4.1 artifacts.
-Detached RSA/SHA-256 signatures for .pyz and .so: verified.
-
-The Linux .so is CPython 3.13 ABI-specific. It is not a Windows DLL.
-
-SIGNING TRUST
+CI ACCEPTANCE
 -------------
-The Windows default certificate is self-signed and trusted only in the current
-Windows user's trust stores. It does not provide public publisher trust or
-SmartScreen reputation. Public Windows distribution requires a CA-issued
-Authenticode code-signing certificate.
+The new GitHub Actions workflow runs offline tests on Windows and Linux across
+CPython 3.11-3.15, builds a Python wheel, and runs target-native Linux and
+Windows build jobs. The Windows CI artifact job skips Authenticode signing;
+a developer Windows release must still run BUILD_AND_SIGN_WINDOWS.bat for
+local signing and the post-sign verification sequence.
 
-The Linux certificate is a self-signed development certificate. Detached
-signatures prove integrity relative to the included public certificate; they
-do not establish public publisher identity.
-
-WINDOWS RC HOTFIX (3.4.1)
-------------------------
-The DLL VERSIONINFO template now uses self-contained numeric FILEOS and
-FILETYPE constants (0x00040004L and 0x00000002L). This avoids RC2104 when
-rc.exe is launched without an initialized Windows SDK include environment.
-The Windows PyInstaller command explicitly includes only Plyer's Windows
-notification backend instead of recursively collecting Android/iOS/macOS/
-Linux backends; this removes irrelevant platform imports and the optional
-Android jnius collection warning.
+SCOPE
+-----
+Only public global Discord service status and independent network telemetry.
+No per-guild, user-account, or private bot monitoring.

@@ -1,4 +1,4 @@
-DISCORD GLOBAL STATUS MONITOR 3.4.1 - BUILD INFO
+DISCORD GLOBAL STATUS MONITOR 3.4.4 - BUILD INFO
 =================================================
 
 WINDOWS BUILD AND SIGN PIPELINE (ALIGNED WITH D2 DAMAGE TRACKER)
@@ -10,20 +10,23 @@ WINDOWS BUILD AND SIGN PIPELINE (ALIGNED WITH D2 DAMAGE TRACKER)
      PyInstaller EXE metadata and Windows DLL RC metadata from templates.
   4. Build DiscordGlobalStatusMonitor.exe as a one-file console application
      with DGSM.ico and Windows version information.
-  5. Compile assets\DGSM.rc using Windows SDK rc.exe and link the .res into
-     the CFFI C ABI DLL with the MSVC x64 toolchain.
-  6. Run EXE --help/--version and C ABI DLL smoke tests before signing.
-  7. Find an installed Microsoft Authenticode-valid SignTool; if absent,
+  5. Compile assets\DGSM.rc using Windows SDK rc.exe. RT_VERSION uses the
+     standard numeric resource name ordinal 1 (1 VERSIONINFO).
+  6. Link the .res into the CFFI DLL, then use embed_windows_resources.py /
+     Win32 UpdateResourceW to apply and validate RT_VERSION and icon resources
+     before ProductVersion/FileDescription checks and Authenticode signing.
+  7. Run EXE --help/--version and C ABI DLL smoke tests before signing.
+  8. Find an installed Microsoft Authenticode-valid SignTool; if absent,
      download Microsoft.Windows.SDK.BuildTools from NuGet into a temporary
      directory, validate the embedded signtool.exe signature, and clean it up.
-  8. Reuse/create a CurrentUser code-signing certificate or accept a PFX.
+  9. Reuse/create a CurrentUser code-signing certificate or accept a PFX.
      Local self-signed certs are exported as .cer and trusted only for the
      current user in Root and TrustedPublisher stores.
-  9. Sign the EXE and DLL using SHA-256 Authenticode. Try DigiCert and Sectigo
+ 10. Sign the EXE and DLL using SHA-256 Authenticode. Try DigiCert and Sectigo
      RFC 3161 timestamping; if both fail, sign without timestamp and report it.
- 10. Run SignTool verify and Get-AuthenticodeSignature for both files, then
+ 11. Run SignTool verify and Get-AuthenticodeSignature for both files, then
      re-run native artifact smoke tests after signing.
- 11. Create the Desktop shortcut, package the signed outputs, emit SHA-256
+ 12. Create the Desktop shortcut, package the signed outputs, emit SHA-256
      manifests and clean temporary build files unless -KeepBuildCache is set.
 
 UAC / USER PROFILE

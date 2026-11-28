@@ -21,7 +21,7 @@ MODULE_NAME = "_dgsm_embed"
 
 def make_builder(resource_file: Path | None = None) -> FFI:
     """Create the CFFI embedding builder and optionally link a Windows .res."""
-    extra_link_args: list[str] = []
+    extra_objects: list[str] = []
     if resource_file is not None:
         resource_file = resource_file.expanduser().resolve()
         if not resource_file.is_file():
@@ -31,7 +31,7 @@ def make_builder(resource_file: Path | None = None) -> FFI:
         if resource_file.suffix.lower() != ".res":
             raise ValueError(f"Expected a compiled .res file, received: {resource_file}")
         # Distutils' MSVC linker accepts compiled .res files as link inputs.
-        extra_link_args.append(str(resource_file))
+        extra_objects.append(str(resource_file))
 
     ffibuilder = FFI()
     ffibuilder.embedding_api(
@@ -45,7 +45,7 @@ def make_builder(resource_file: Path | None = None) -> FFI:
     ffibuilder.set_source(
         MODULE_NAME,
         "#include <string.h>\n",
-        extra_link_args=extra_link_args,
+        extra_objects=extra_objects,
     )
     embedding_code = r'''
 import os

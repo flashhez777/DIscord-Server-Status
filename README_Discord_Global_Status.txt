@@ -1,4 +1,4 @@
-DISCORD GLOBAL STATUS MONITOR (DGSM) 3.4.1
+DISCORD GLOBAL STATUS MONITOR (DGSM) 3.4.4
 ==========================================
 
 Cross-platform monitor for Discord GLOBAL public service health only. It does
@@ -10,7 +10,8 @@ GLOBAL STATUS AND TELEMETRY
   scheduled maintenance.
 * Local REST API, Gateway, CDN, DNS, TLS and host network interface metrics.
 * Globalping distributed ICMP, HTTP/HTTPS, DNS and MTR probes.
-* Optional read-only RIPE Atlas results for existing public measurements.
+* Integrated optional read-only RIPE Atlas results for operator-selected
+  existing measurements; separate worker, 15-minute default refresh.
 * RTT median/p95, packet loss, HTTP timing breakdown, quota and historical
   telemetry. Each sample carries its measurement vantage/source.
 * Verified TLS using OS trust roots, certifi and optional approved CA PEM.
@@ -41,17 +42,19 @@ extends it to both DGSM.exe and the native C ABI DLL:
   2. Create an isolated .build\windows\venv and install requirements-build.txt.
   3. Derive EXE/DLL version resources from dgsm_version.py.
   4. Build the one-file console EXE with PyInstaller, DGSM.ico and version info.
-  5. Use Windows SDK rc.exe to compile the DLL icon/version resource, then
-     link the resource into the CFFI DLL using MSVC x64.
-  6. Smoke-test the EXE and DLL before signing.
-  7. Use installed Microsoft SignTool; if missing, download Microsoft's SDK
+  5. Compile the DLL's icon and version resource with Windows SDK rc.exe.
+     RT_VERSION uses standard numeric resource name ID 1 (1 VERSIONINFO).
+  6. Link the .res into the CFFI DLL, then apply and validate resource records
+     with Win32 UpdateResourceW before DLL version verification.
+  7. Smoke-test the EXE and DLL before signing.
+  8. Use installed Microsoft SignTool; if missing, download Microsoft's SDK
      BuildTools NuGet package to a temporary directory, validate its embedded
      Authenticode-signed SignTool, and delete temporary files after signing.
-  8. Reuse/create a CurrentUser code-signing cert or use a PFX. Sign both files
+  9. Reuse/create a CurrentUser code-signing cert or use a PFX. Sign both files
      with SHA-256 Authenticode, try DigiCert/Sectigo timestamping, fall back
      to signing without a timestamp if both timestamp authorities are down.
-  9. Verify signatures and run the post-sign EXE/DLL smoke tests.
- 10. Create a Desktop shortcut, package binaries and a SHA-256 manifest, then
+ 10. Verify signatures and run the post-sign EXE/DLL smoke tests.
+ 11. Create a Desktop shortcut, package binaries and a SHA-256 manifest, then
      clean the venv and build intermediates by default.
 
 Only Microsoft toolchain installers that need elevation receive UAC. The build
@@ -101,6 +104,8 @@ DIAGNOSTICS
   python3 discord_server_global_status.py --once
   python3 discord_server_global_status.py --history
   python3 discord_server_global_status.py --telemetry-history
+  python3 discord_server_global_status.py --ripe-atlas-ids 12345678,12345679
+  python3 discord_server_global_status.py --no-ripe-atlas
   python3 -m unittest -v test_discord_server_global_status.py
 
 TLS verification remains enabled. Do not disable certificate checks to work

@@ -1,4 +1,4 @@
-DGSM 3.4.1 - WINDOWS BUILD TROUBLESHOOTING
+DGSM 3.4.4 - WINDOWS BUILD TROUBLESHOOTING
 ==========================================
 
 WHAT CHANGED
@@ -12,7 +12,7 @@ The previous failure had two causes:
   2. The builder insisted on CPython 3.12 even though Python 3.15 was already
      installed, then treated WinGet as mandatory.
 
-DGSM 3.4.1 behavior:
+DGSM 3.4.4 behavior:
   * Removes stale previous release ZIP/checksum/signing report before a new
     build starts, preventing an old successful release from being confused
     with new partially built binaries.
@@ -129,3 +129,21 @@ relying on winver.h being discoverable from an uninitialized shell.
 The Windows PyInstaller target includes the specific
 plyer.platforms.win.notification backend. It intentionally does not collect
 Android, iOS, macOS or Linux Plyer modules into the Windows executable.
+
+
+DLL VERSIONINFO / ICON RESOURCE VALIDATION (3.4.3+)
+---------------------------------------------------
+The RC resource file must declare the version block as:
+  1 VERSIONINFO
+
+This emits RT_VERSION (type 16) with standard numeric name ordinal 1. Do not
+write an undefined literal token such as VS_VERSION_INFO VERSIONINFO: rc.exe
+can emit it as a string-named resource that normal Windows version APIs do
+not find.
+
+After CFFI links the DLL, build_windows.ps1 invokes
+embed_windows_resources.py. The helper validates all required resource
+identities before applying records with BeginUpdateResourceW,
+UpdateResourceW and EndUpdateResourceW. The builder then checks ProductVersion
+and FileDescription before signing. If validation fails, inspect the logged
+resource listing: type=16 name=1 is required (not name='VS_VERSION_INFO').
