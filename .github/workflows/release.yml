@@ -194,11 +194,17 @@ jobs:
         run: |
           version="$(python -c 'from dgsm_version import __version__; print(__version__)')"
           tag="v${version}"
+          mapfile -d '' -t assets < <(find release-assets/windows -type f -print0 | sort -z)
+          assets+=( "release-assets/linux/DGSM-Linux-x64.tar.gz" )
+          assets+=( "release-assets/SHA256SUMS-RELEASE.txt" )
+          assets+=( "Discord_Global_Status_Monitor_v${version}_RELEASE_NOTES.txt" )
+
+          if [[ "${#assets[@]}" -lt 4 ]]; then
+            echo "Release asset collection is incomplete." >&2
+            exit 1
+          fi
           gh release create "${tag}" \
             --verify-tag \
             --title "DGSM ${version}" \
-            --notes-file Discord_Global_Status_Monitor_v${version}_RELEASE_NOTES.txt \
-            release-assets/windows/* \
-            release-assets/linux/DGSM-Linux-x64.tar.gz \
-            release-assets/SHA256SUMS-RELEASE.txt \
-            Discord_Global_Status_Monitor_v${version}_RELEASE_NOTES.txt
+            --notes-file "Discord_Global_Status_Monitor_v${version}_RELEASE_NOTES.txt" \
+            "${assets[@]}"
