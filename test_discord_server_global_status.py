@@ -707,7 +707,7 @@ class RipeAtlasBackendTests(unittest.TestCase):
         from backends.ripe_atlas import BackendError, _get_json
         with mock.patch("backends.ripe_atlas.safe_urlopen") as opener:
             with self.assertRaisesRegex(BackendError, "invalid characters"):
-                _get_json(12345, 5, ssl.create_default_context(), "secret\\r\\nInjected: yes")
+                _get_json(12345, 5, ssl.create_default_context(), "secret\r\nInjected: yes")
             opener.assert_not_called()
 
     def test_latest_results_dict_shape_is_normalized_by_probe_id(self):
