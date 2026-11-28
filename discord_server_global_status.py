@@ -6,8 +6,8 @@ public service status, incidents, maintenance, voice regions and client status.
 It also offers clearly-labelled local connectivity probes from this machine.
 
 No Discord account, bot token, or API key is needed. The core monitor uses
-Python's standard library. Optional notification/color packages are installed
-automatically into a private app-local folder when possible.
+Python's standard library. Optional notification, DNS-detail and host-metric
+packages install only when explicitly requested with --auto-install.
 Python 3.9+ recommended.
 """
 
@@ -230,8 +230,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beep", action="store_true", help="Beep when a meaningful status change is detected.")
     parser.add_argument("--no-notifications", action="store_true",
                         help="Disable native desktop notifications.")
-    parser.add_argument("--no-auto-install", action="store_true",
-                        help="Do not automatically install optional packages.")
+    parser.add_argument("--auto-install", dest="auto_install", action="store_true",
+                        help="Explicitly install optional packages from HTTPS PyPI using binary wheels.")
+    parser.add_argument("--no-auto-install", dest="auto_install", action="store_false",
+                        help="Keep optional package installation disabled (the default).")
+    parser.set_defaults(auto_install=False)
     parser.add_argument("--no-globalping", action="store_true",
                         help="Disable third-party worldwide measurements (Globalping).")
     parser.add_argument("--global-probes", type=int, default=10,
@@ -270,6 +273,7 @@ def parse_args() -> argparse.Namespace:
                         help="Override the directory used for local state, vendor packages and event history.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     args = parser.parse_args()
+    args.no_auto_install = not args.auto_install
     if not math.isfinite(args.interval) or args.interval < 10:
         parser.error("--interval must be finite and at least 10 seconds")
     if not math.isfinite(args.timeout) or not 0 < args.timeout <= 300:
@@ -406,7 +410,8 @@ def bootstrap_optional_dependencies(args: argparse.Namespace, data_dir: Path) ->
             vendor_dir.mkdir(parents=True, exist_ok=True)
             command = [
                 sys.executable, "-m", "pip", "install",
-                "--disable-pip-version-check", "--quiet", "--upgrade",
+                "--disable-pip-version-check", "--quiet", "--no-input", "--upgrade",
+                "--only-binary=:all:", "--index-url", "https://pypi.org/simple",
                 "--target", str(vendor_dir), requirement,
             ]
             result = subprocess.run(
