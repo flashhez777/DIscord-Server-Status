@@ -110,6 +110,19 @@ signature. A self-signed certificate is not a publicly trusted publisher
 identity and does not eliminate SmartScreen warnings. Public release signing
 requires a CA-issued code-signing certificate.
 
+WINDOWS CI SIGNING HANG
+-----------------------
+The Windows CI build previously stopped after:
+  Creating reusable user-scoped local code-signing certificate...
+
+The old New-SelfSignedCertificate cmdlet could block inside the Windows
+certificate provider on a hosted runner. The development path now creates
+the certificate using .NET CertificateRequest and the RSA CryptoAPI provider,
+then persists it in Cert:\CurrentUser\My. The Windows build step also has a
+30-minute timeout so a future provider or toolchain stall cannot consume the
+runner's full six-hour limit. This remains a local self-signed development
+identity; it is not a publicly trusted publisher signature.
+
 IF IT STILL FAILS
 -----------------
 Attach the latest timestamped transcript from .build\windows\logs\ and the

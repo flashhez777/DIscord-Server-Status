@@ -124,6 +124,7 @@ jobs:
             Write-Host "PowerShell syntax: PASS - $script"
           }
       - name: Build, development-sign, and verify Windows artifacts
+        timeout-minutes: 30
         shell: powershell
         run: .\build_windows.ps1 -NoToolchainInstall
       - name: Upload Windows development-signed artifacts
