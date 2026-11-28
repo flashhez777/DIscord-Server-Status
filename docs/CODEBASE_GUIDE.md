@@ -60,7 +60,7 @@ The main state files are:
 
 Default per-user state locations are:
 
-- Windows: `%LOCALAPPDATA%\\DiscordGlobalStatusMonitor`
+- Windows: `%LOCALAPPDATA%\DiscordGlobalStatusMonitor`
 - macOS: `~/Library/Application Support/DiscordGlobalStatusMonitor`
 - Linux: `$XDG_STATE_HOME/DiscordGlobalStatusMonitor`, or `~/.local/state/DiscordGlobalStatusMonitor` when XDG_STATE_HOME is unset.
 
