@@ -1422,13 +1422,17 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
         "down": sum(1 for row in rows if row.get("state") == "DOWN"),
     }
     if test_type == "dns":
-        signatures = {tuple(row.get("answer_set", [])) for row in rows}
+        resolved_rows = [row for row in rows if row.get("dns_answer_state") == "RESOLVED"]
+        signatures = {tuple(row.get("answer_set", [])) for row in resolved_rows}
         summary.update({
             "resolver_responses": sum(1 for row in rows if row.get("resolver_responded")),
-            "resolved": sum(1 for row in rows if row.get("dns_answer_state") == "RESOLVED"),
+            "resolved": len(resolved_rows),
             "nodata": sum(1 for row in rows if row.get("dns_answer_state") == "NODATA"),
             "unique_answer_sets": len(signatures),
-            "answer_set_consistent": len(signatures) <= 1,
+            "answer_set_consistent": (
+                len(signatures) == 1 and len(resolved_rows) == len(rows)
+                if rows else None
+            ),
         })
     return {
         "type": clip(test_type, 24),
