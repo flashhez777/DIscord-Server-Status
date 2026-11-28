@@ -670,9 +670,15 @@ def request_json(url: str, timeout: float) -> tuple[dict[str, Any], float]:
             if len(raw) > 2 * 1024 * 1024:
                 raise MonitorError("Discord Statuspage summary exceeded the 2 MiB response safety limit")
     except urllib.error.HTTPError as exc:
-        retry_after = exc.headers.get("Retry-After") if exc.headers else None
-        suffix = f"; Retry-After: {retry_after}s" if retry_after else ""
-        raise MonitorError(f"HTTP {exc.code} {exc.reason}{suffix}") from exc
+        try:
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            suffix = f"; Retry-After: {retry_after}s" if retry_after else ""
+            raise MonitorError(f"HTTP {exc.code} {exc.reason}{suffix}") from exc
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
     except urllib.error.URLError as exc:
         tls_detail = tls_failure_message(exc)
         if tls_detail:
@@ -856,8 +862,14 @@ def probe_cdn(timeout: float) -> ProbeResult:
                 return ProbeResult("Media CDN", "UP", elapsed, "Discord CDN image endpoint returned data")
             return ProbeResult("Media CDN", "WARN", elapsed, f"HTTP {code}; response body was empty")
     except urllib.error.HTTPError as exc:
-        return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0,
-                           f"HTTP {exc.code} {exc.reason}")
+        try:
+            return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0,
+                               f"HTTP {exc.code} {exc.reason}")
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
     except Exception as exc:
         detail = tls_failure_message(exc) or str(exc)
         return ProbeResult("Media CDN", "DOWN", (time.perf_counter() - start) * 1000.0, detail)
@@ -982,20 +994,26 @@ def globalping_request(method: str, url: str, timeout: float,
                         detail = clip(errors, 1000)
             except Exception:
                 pass
-            retry = exc.headers.get("Retry-After") if exc.headers else None
-            suffix = f"; Retry-After={retry}s" if retry else ""
-            if exc.code == 429:
+            try:
+                retry = exc.headers.get("Retry-After") if exc.headers else None
+                suffix = f"; Retry-After={retry}s" if retry else ""
+                if exc.code == 429:
+                    raise MonitorError(
+                        f"Globalping rate limit (HTTP 429){suffix}. Wait for the provider reset "
+                        f"or reduce measurements; optional authentication uses {argsafe_env_name()}."
+                    ) from exc
+                if normalized_method == "GET" and exc.code in {500, 502, 503, 504} and attempt + 1 < attempts:
+                    time.sleep(0.5 * (2 ** attempt) + random.uniform(0.0, 0.25))
+                    last_error = exc
+                    continue
                 raise MonitorError(
-                    f"Globalping rate limit (HTTP 429){suffix}. Wait for the provider reset "
-                    f"or reduce measurements; optional authentication uses {argsafe_env_name()}."
+                    f"Globalping HTTP {exc.code}: {detail or exc.reason}{suffix}"
                 ) from exc
-            if normalized_method == "GET" and exc.code in {500, 502, 503, 504} and attempt + 1 < attempts:
-                time.sleep(0.5 * (2 ** attempt) + random.uniform(0.0, 0.25))
-                last_error = exc
-                continue
-            raise MonitorError(
-                f"Globalping HTTP {exc.code}: {detail or exc.reason}{suffix}"
-            ) from exc
+            finally:
+                try:
+                    exc.close()
+                except Exception:
+                    pass
 
         except urllib.error.URLError as exc:
             tls_detail = tls_failure_message(exc)
