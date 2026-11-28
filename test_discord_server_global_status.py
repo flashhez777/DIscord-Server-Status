@@ -519,14 +519,19 @@ class SecureTransportTests(unittest.TestCase):
             "https://api.globalping.io/v1/limits",
             headers={"Authorization": "Bearer do-not-leak"},
         )
+        cross_origin_response = io.BytesIO()
         with self.assertRaises(urllib.error.HTTPError):
             handler.redirect_request(
-                request, io.BytesIO(), 302, "Found", {}, "https://evil.example/collect"
+                request, cross_origin_response, 302, "Found", {}, "https://evil.example/collect"
             )
+        self.assertTrue(cross_origin_response.closed)
+
+        downgrade_response = io.BytesIO()
         with self.assertRaises(urllib.error.HTTPError):
             handler.redirect_request(
-                request, io.BytesIO(), 302, "Found", {}, "http://api.globalping.io/v1/limits"
+                request, downgrade_response, 302, "Found", {}, "http://api.globalping.io/v1/limits"
             )
+        self.assertTrue(downgrade_response.closed)
 
     def test_redirect_handler_allows_same_origin_https_get(self):
         from backends.http_transport import SameOriginHTTPSRedirectHandler
@@ -697,6 +702,13 @@ class RipeAtlasBackendTests(unittest.TestCase):
         self.assertAlmostEqual(row["latency_ms"], 21.0)
         self.assertAlmostEqual(row["loss_pct"], 100 / 3)
         self.assertAlmostEqual(normalized["summary"]["median_ms"], 21.0)
+
+    def test_ripe_atlas_api_key_rejects_header_injection_before_network(self):
+        from backends.ripe_atlas import BackendError, _get_json
+        with mock.patch("backends.ripe_atlas.safe_urlopen") as opener:
+            with self.assertRaisesRegex(BackendError, "invalid characters"):
+                _get_json(12345, 5, ssl.create_default_context(), "secret\\r\\nInjected: yes")
+            opener.assert_not_called()
 
     def test_latest_results_dict_shape_is_normalized_by_probe_id(self):
         from backends.ripe_atlas import _get_json
