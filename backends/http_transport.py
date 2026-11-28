@@ -45,21 +45,31 @@ class SameOriginHTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
         try:
             new_origin = _https_origin(newurl)
         except ValueError as exc:
+            try:
+                if fp is not None:
+                    fp.close()
+            except Exception:
+                pass
             raise urllib.error.HTTPError(
                 newurl,
                 code,
                 f"Unsafe redirect blocked: {exc}",
                 headers,
-                fp,
+                None,
             ) from exc
 
         if new_origin != self._origin or req.get_method().upper() not in {"GET", "HEAD"}:
+            try:
+                if fp is not None:
+                    fp.close()
+            except Exception:
+                pass
             raise urllib.error.HTTPError(
                 newurl,
                 code,
                 "Unsafe redirect blocked: only same-origin HTTPS GET/HEAD redirects are allowed.",
                 headers,
-                fp,
+                None,
             )
 
         return super().redirect_request(req, fp, code, msg, headers, newurl)
