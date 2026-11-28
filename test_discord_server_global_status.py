@@ -30,6 +30,22 @@ class FakeResponse:
 
 
 class TLSAndNetworkTests(unittest.TestCase):
+    def test_rest_gateway_probe_rejects_unexpected_websocket_hosts(self):
+        with mock.patch.object(
+            monitor, "request_json", return_value=({"url": "wss://evil.example"}, 1.0)
+        ):
+            result = monitor.probe_rest_api(2)
+        self.assertEqual(result.state, "WARN")
+        self.assertIn("invalid", result.detail)
+
+    def test_rest_gateway_probe_accepts_official_gateway_url(self):
+        with mock.patch.object(
+            monitor, "request_json", return_value=({"url": "wss://gateway.discord.gg"}, 1.0)
+        ):
+            result = monitor.probe_rest_api(2)
+        self.assertEqual(result.state, "UP")
+        self.assertIn("expected Discord Gateway URL", result.detail)
+
     def setUp(self):
         monitor._TLS_CONTEXT = None
         monitor._TLS_CA_SOURCES = []
