@@ -18,9 +18,11 @@ import base64
 import concurrent.futures
 import ctypes
 import hashlib
+import ipaddress
 import importlib
 import importlib.util
 import json
+import math
 import os
 import platform
 import random
@@ -31,7 +33,9 @@ import ssl
 import statistics
 import subprocess
 import sys
+import tempfile
 import textwrap
+import unicodedata
 import time
 import urllib.error
 import urllib.request
@@ -42,6 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from backends.http_transport import safe_urlopen
 from dgsm_version import __version__ as VERSION
 
 APP_NAME = "Discord Global Status Monitor"
@@ -56,6 +61,14 @@ GLOBALPING_API = "https://api.globalping.io/v1"
 GLOBALPING_MEASUREMENTS = GLOBALPING_API + "/measurements"
 GLOBALPING_RATE_LIMITS = GLOBALPING_API + "/limits"
 GLOBALPING_DEFAULT_TARGET = "gateway.discord.gg"
+MAX_GLOBALPING_RESULT_ROWS = 100
+MAX_DNS_ANSWER_RECORDS = 64
+DNS_RCODE_NAMES = {
+    0: "NOERROR", 1: "FORMERR", 2: "SERVFAIL", 3: "NXDOMAIN",
+    4: "NOTIMP", 5: "REFUSED", 6: "YXDOMAIN", 7: "YXRRSET",
+    8: "NXRRSET", 9: "NOTAUTH", 10: "NOTZONE", 11: "DSOTYPENI",
+    16: "BADVERS",
+}
 
 # ANSI palette. ANSI mode is enabled on Windows terminals where supported.
 RESET = "\033[0m"
@@ -161,10 +174,33 @@ def status_label(status: str) -> str:
     return (status or "unknown").replace("_", " ").upper()
 
 
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\))"
+    r"|\x9B[0-?]*[ -/]*[@-~]|\x9D[^\x07\x9C]*(?:\x07|\x9C)"
+)
+_BIDI_CONTROL_CODEPOINTS = (
+    {0x061C, 0x200E, 0x200F}
+    | set(range(0x202A, 0x202F))
+    | set(range(0x2066, 0x206A))
+)
+
+
 def clip(value: Any, width: int) -> str:
-    text = " ".join(str(value).replace("\r", " ").replace("\n", " ").split())
+    """Bound untrusted text and remove terminal/bidirectional control injection."""
     if width <= 0:
         return ""
+    raw = _ANSI_ESCAPE_RE.sub("", str(value))
+    safe_chars: list[str] = []
+    for character in raw:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        if character in "\r\n\t":
+            safe_chars.append(" ")
+        elif category in {"Cc", "Cs"} or codepoint in _BIDI_CONTROL_CODEPOINTS:
+            continue
+        else:
+            safe_chars.append(character)
+    text = " ".join("".join(safe_chars).split())
     if len(text) <= width:
         return text
     if width == 1:
@@ -234,12 +270,14 @@ def parse_args() -> argparse.Namespace:
                         help="Override the directory used for local state, vendor packages and event history.")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     args = parser.parse_args()
-    if args.interval < 10:
-        parser.error("--interval must be at least 10 seconds to avoid excessive polling")
-    if args.timeout <= 0:
-        parser.error("--timeout must be greater than zero")
-    if args.ripe_atlas_interval < 300:
-        parser.error("--ripe-atlas-interval must be at least 300 seconds")
+    if not math.isfinite(args.interval) or args.interval < 10:
+        parser.error("--interval must be finite and at least 10 seconds")
+    if not math.isfinite(args.timeout) or not 0 < args.timeout <= 300:
+        parser.error("--timeout must be finite and between 0 and 300 seconds")
+    if not math.isfinite(args.ripe_atlas_interval) or args.ripe_atlas_interval < 300:
+        parser.error("--ripe-atlas-interval must be finite and at least 300 seconds")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.globalping_token_env):
+        parser.error("--globalping-token-env must be a valid environment-variable name")
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", args.ripe_atlas_api_key_env):
         parser.error("--ripe-atlas-api-key-env must be a valid environment-variable name")
     if args.no_ripe_atlas:
@@ -257,8 +295,9 @@ def parse_args() -> argparse.Namespace:
     if not 1 <= args.trace_probes <= 10:
         parser.error("--trace-probes must be between 1 and 10")
     for name in ("global_interval", "http_interval", "dns_interval", "cdn_interval", "trace_interval"):
-        if getattr(args, name) < 60:
-            parser.error(f"--{name.replace('_', '-')} must be at least 60 seconds")
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 60:
+            parser.error(f"--{name.replace('_', '-')} must be finite and at least 60 seconds")
     # Globalping counts probe executions as tests. Keep defaults well below
     # its published anonymous hourly budget and account for custom settings.
     estimated = (
@@ -614,7 +653,10 @@ def request_json(url: str, timeout: float) -> tuple[dict[str, Any], float]:
     )
     start = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=tls_context()) as response:
+        with safe_urlopen(
+            request, timeout=timeout, context=tls_context(),
+            allowed_hosts={"discordstatus.com", "discord.com"},
+        ) as response:
             code = getattr(response, "status", 200)
             if code != 200:
                 raise MonitorError(f"HTTP {code}")
@@ -778,7 +820,10 @@ def probe_cdn(timeout: float) -> ProbeResult:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=tls_context()) as response:
+        with safe_urlopen(
+            request, timeout=timeout, context=tls_context(),
+            allowed_hosts={"cdn.discordapp.com"},
+        ) as response:
             code = getattr(response, "status", 200)
             # Read a small amount to verify that the endpoint actually serves data.
             sample = response.read(64)
@@ -923,12 +968,16 @@ def argsafe_env_name() -> str:
 
 
 def numeric(value: Any) -> Optional[float]:
+    """Parse finite, non-negative network metrics; reject booleans and NaN/Inf."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
     try:
-        if value is None or value == "":
-            return None
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    return parsed
 
 
 def fetch_globalping_limits(args: argparse.Namespace) -> dict[str, Any]:
