@@ -1,30 +1,32 @@
-Discord Global Status Monitor 3.2.1 - build notes
+DGSM BUILD INFO — CURRENT DOCUMENTATION POINTER
+================================================
 
-Python source: discord_server_global_status.py
-Linux Python zipapp: dist/linux/DiscordGlobalStatusMonitor.pyz
-Optional Linux C ABI: dist/linux/discord_global_status.so
+ARCHIVE NOTICE
+--------------
+The original contents of this file described DGSM 3.2.1. They have been
+preserved in docs/archive/BUILD_INFO-v3.2.1.txt so that old build evidence is
+not confused with the current source version.
 
-Linux C ABI build environment:
-  OS: Linux x86_64
-  CPython: 3.13.5
-  OpenSSL: 3.5.5
-  C compiler: system cc / CFFI embedding backend
+CURRENT SOURCE VERSION
+----------------------
+Read dgsm_version.py for the canonical application version.
 
-The .so links to libpython3.13.so.1.0 and is not a standalone executable.
-Rebuild it with build_linux.sh on the destination system if its CPython ABI,
-architecture, or system libraries differ.
+For current DGSM build and release information, use:
+  README.md
+  Discord_Global_Status_Monitor_BUILD_INFO.txt
+  BUILD_SIGNING_WINDOWS.txt
+  BUILD_TROUBLESHOOTING.txt
+  README_Linux_Artifacts.txt
+  RELEASE_VALIDATION.txt
+  docs/CODEBASE_GUIDE.md
+  docs/RELEASE_ENGINEERING.md
 
-Windows EXE and DLL:
-  Not prebuilt in this Linux environment. Build them on Windows x64 by running
-  build_windows.ps1. The script installs PyInstaller and CFFI into a local venv,
-  builds the EXE and C ABI DLL, and signs them with SignTool.
-  Visual Studio Build Tools (Desktop development with C++) and Windows SDK
-  (SignTool) are required for native DLL compilation and Authenticode signing.
+The current native build matrix and signing behavior are defined by:
+  .github/workflows/ci.yml
+  build_windows.ps1
+  sign_windows.ps1
+  build_linux.sh
+  sign_linux.sh
 
-Validation:
-  14 offline unit tests passed.
-  Python compilation passed.
-  Python zipapp --version/help passed.
-  Linux C ABI library loaded through ctypes and exported version 3.2.1.
-  Live Discord/Globalping endpoints were not reachable during this build because
-  the build environment had DNS resolution failures; see --doctor on the target.
+Do not use the archived 3.2.1 test counts, interpreter versions, build
+environment details, or artifact statements as evidence for 3.4.4 or later.
