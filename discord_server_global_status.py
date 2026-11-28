@@ -856,13 +856,46 @@ def run_local_probes(timeout: float) -> list[ProbeResult]:
 def globalping_request(method: str, url: str, timeout: float,
                        token: Optional[str] = None,
                        payload: Optional[dict[str, Any]] = None) -> tuple[dict[str, Any], dict[str, str]]:
-    """Call Globalping with strict TLS and bounded retries for idempotent GETs.
-
-    POST measurement creation is never retried automatically: if a connection
-    drops after the server accepted a POST, retrying could create duplicate tests.
-    """
+    """Call only the official Globalping HTTPS API with bounded safe retries."""
     normalized_method = method.upper()
-    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    if normalized_method not in {"GET", "POST"}:
+        raise MonitorError("Globalping requests are limited to GET and POST.")
+    try:
+        parsed_url = urlsplit(url)
+        port = parsed_url.port
+    except (TypeError, ValueError) as exc:
+        raise MonitorError(f"Invalid Globalping API URL: {exc}") from exc
+    if (
+        parsed_url.scheme.casefold() != "https"
+        or (parsed_url.hostname or "").rstrip(".").casefold() != "api.globalping.io"
+        or port not in (None, 443)
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or parsed_url.query
+        or parsed_url.fragment
+    ):
+        raise MonitorError("Globalping requests must use the official api.globalping.io HTTPS origin.")
+    if not math.isfinite(timeout) or not 0 < timeout <= 300:
+        raise MonitorError("Globalping request timeout must be finite and between 0 and 300 seconds.")
+    allowed_paths = {"/v1/limits", "/v1/measurements"}
+    measurement_path = re.fullmatch(r"/v1/measurements/[A-Za-z0-9_-]{1,128}", parsed_url.path)
+    if parsed_url.path not in allowed_paths and not measurement_path:
+        raise MonitorError("Globalping API path is not an allowed DGSM endpoint.")
+    if normalized_method == "POST" and parsed_url.path != "/v1/measurements":
+        raise MonitorError("Globalping POST is restricted to measurement creation.")
+    if normalized_method == "GET" and payload is not None:
+        raise MonitorError("Globalping GET requests cannot include a request body.")
+    if normalized_method == "POST" and not isinstance(payload, dict):
+        raise MonitorError("Globalping measurement creation requires a JSON object payload.")
+    if token is not None and (
+        not isinstance(token, str) or not token or len(token) > 8192
+        or "\r" in token or "\n" in token
+    ):
+        raise MonitorError("Globalping bearer token contains invalid characters or exceeds the size limit.")
+    try:
+        body = None if payload is None else json.dumps(payload, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise MonitorError(f"Globalping request payload is not valid JSON: {exc}") from exc
     headers = {
         "User-Agent": USER_AGENT,
         "Accept": "application/json",
@@ -881,8 +914,11 @@ def globalping_request(method: str, url: str, timeout: float,
             url, data=body, headers=headers, method=normalized_method
         )
         try:
-            with urllib.request.urlopen(
-                request, timeout=timeout, context=tls_context()
+            with safe_urlopen(
+                request,
+                timeout=timeout,
+                context=tls_context(),
+                allowed_hosts={"api.globalping.io"},
             ) as response:
                 raw = response.read(4 * 1024 * 1024 + 1)
                 if len(raw) > 4 * 1024 * 1024:
@@ -1080,12 +1116,149 @@ def create_globalping_measurement(test_type: str, target: str, probe_limit: int,
     return final
 
 
+def _parse_dns_ttl(value: Any) -> Optional[int]:
+    """Validate a DNS TTL as an unsigned 31-bit integer."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        ttl = value
+    elif isinstance(value, float) and math.isfinite(value) and value.is_integer():
+        ttl = int(value)
+    elif isinstance(value, str) and value.isascii() and value.isdigit() and len(value) <= 10:
+        try:
+            ttl = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return ttl if 0 <= ttl <= 2_147_483_647 else None
+
+
+def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
+    """Canonicalize DNS RRsets; answer order and cache TTL do not define identity."""
+    raw_answers = answers if isinstance(answers, list) else []
+    truncated = len(raw_answers) > MAX_DNS_ANSWER_RECORDS
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    rrset_ttls: dict[tuple[str, str], set[int]] = {}
+    invalid_records = 0
+    missing_ttls = 0
+
+    for answer in raw_answers[:MAX_DNS_ANSWER_RECORDS]:
+        if not isinstance(answer, dict):
+            invalid_records += 1
+            continue
+        raw_name = answer.get("name") or fallback_target
+        if not isinstance(raw_name, str):
+            invalid_records += 1
+            continue
+        name = raw_name.strip().lower().rstrip(".")
+        if (
+            not name or len(name) > 253
+            or any(ch.isspace() or ord(ch) < 33 for ch in name)
+        ):
+            invalid_records += 1
+            continue
+        name += "."
+
+        raw_type = answer.get("type")
+        if not isinstance(raw_type, str):
+            invalid_records += 1
+            continue
+        record_type = raw_type.strip().upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9-]{0,15}", record_type):
+            invalid_records += 1
+            continue
+
+        raw_value = answer.get("value")
+        if not isinstance(raw_value, (str, int, float)) or isinstance(raw_value, bool):
+            invalid_records += 1
+            continue
+        raw_value_text = str(raw_value).strip()
+        if not raw_value_text or len(raw_value_text) > 1024:
+            invalid_records += 1
+            continue
+        value = clip(raw_value_text, 1024)
+        if record_type in {"A", "AAAA"}:
+            try:
+                address = ipaddress.ip_address(value)
+                if (record_type == "A" and address.version != 4) or (
+                    record_type == "AAAA" and address.version != 6
+                ):
+                    raise ValueError("address family does not match record type")
+                value = str(address)
+            except ValueError:
+                invalid_records += 1
+                continue
+
+        ttl = _parse_dns_ttl(answer.get("ttl"))
+        if ttl is None:
+            missing_ttls += 1
+
+        identity = (name.casefold(), record_type, value)
+        record = grouped.setdefault(
+            identity,
+            {"name": name, "type": record_type, "value": value, "_ttls": set()},
+        )
+        if ttl is not None:
+            record["_ttls"].add(ttl)
+            rrset_ttls.setdefault((name.casefold(), record_type), set()).add(ttl)
+
+    ordered_records = sorted(
+        grouped.values(),
+        key=lambda item: (
+            item["name"].casefold(), item["type"],
+            item["value"].casefold(), item["value"],
+        ),
+    )
+    normalized_records: list[dict[str, Any]] = []
+    rendered_answers: list[str] = []
+    answer_set: list[str] = []
+    address_answers: list[str] = []
+    all_ttls: list[int] = []
+
+    for record in ordered_records:
+        ttl_values = sorted(record["_ttls"])
+        ttl = ttl_values[0] if ttl_values else None
+        normalized_records.append({
+            "name": record["name"], "type": record["type"],
+            "value": record["value"], "ttl": ttl,
+        })
+        identity_text = f"{record['name']} {record['type']} {record['value']}"
+        answer_set.append(identity_text)
+        rendered_answers.append(identity_text + (f" (TTL {ttl})" if ttl is not None else ""))
+        if record["type"] in {"A", "AAAA"}:
+            address_answers.append(record["value"])
+        all_ttls.extend(ttl_values)
+
+    ttl_conflicts = sum(1 for values in rrset_ttls.values() if len(values) > 1)
+    ttl_values = sorted(all_ttls)
+    return {
+        "answer_records": normalized_records,
+        "answers": rendered_answers,
+        "answer_set": answer_set,
+        "address_answers": sorted(set(address_answers)),
+        "answer_count": len(normalized_records),
+        "ttl_min": min(ttl_values) if ttl_values else None,
+        "ttl_max": max(ttl_values) if ttl_values else None,
+        "ttl_consistent": ttl_conflicts == 0,
+        "ttl_conflicts": ttl_conflicts,
+        "missing_ttls": missing_ttls,
+        "invalid_records": invalid_records,
+        "answers_truncated": truncated,
+        "validation_ok": ttl_conflicts == 0 and invalid_records == 0 and not truncated,
+    }
+
+
 def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any]) -> dict[str, Any]:
-    """Normalize Globalping results to a stable, loggable telemetry record."""
+    """Normalize provider data with bounded rows and validated DNS RRsets."""
+    if not isinstance(data, dict):
+        raise MonitorError("Globalping measurement response must be a JSON object.")
     rows: list[dict[str, Any]] = []
     all_rtts: list[float] = []
     all_losses: list[float] = []
-    results = data.get("results") if isinstance(data.get("results"), list) else []
+    raw_results = data.get("results") if isinstance(data.get("results"), list) else []
+    results_truncated = len(raw_results) > MAX_GLOBALPING_RESULT_ROWS
+    results = raw_results[:MAX_GLOBALPING_RESULT_ROWS]
 
     for entry in results:
         if not isinstance(entry, dict):
