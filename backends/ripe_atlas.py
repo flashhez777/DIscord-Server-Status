@@ -92,7 +92,7 @@ def _get_json(
     if api_key:
         if (
             not isinstance(api_key, str) or not api_key or len(api_key) > 8192
-            or "\\r" in api_key or "\\n" in api_key
+            or "\r" in api_key or "\n" in api_key
         ):
             raise BackendError("RIPE Atlas API key contains invalid characters or exceeds the size limit.")
         headers["Authorization"] = f"Key {api_key}"
@@ -112,18 +112,24 @@ def _get_json(
                 )
             payload = json.loads(raw.decode("utf-8")) if raw else []
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            raise BackendError(f"RIPE Atlas measurement {measurement_id} was not found or is not public (HTTP 404).") from exc
-        if exc.code in (401, 403):
-            raise BackendError(
-                f"RIPE Atlas denied measurement {measurement_id} (HTTP {exc.code}); check whether it is public or configure RIPE_ATLAS_API_KEY."
-            ) from exc
-        retry_after = exc.headers.get("Retry-After") if exc.headers else None
-        if exc.code == 429:
-            suffix = f"Retry-After={retry_after}" if retry_after else "respect the provider's rate limit"
-            raise BackendError(f"RIPE Atlas rate limit reached for measurement {measurement_id}; {suffix}.") from exc
-        suffix = f"; Retry-After={retry_after}" if retry_after else ""
-        raise BackendError(f"RIPE Atlas HTTP {exc.code} {exc.reason}{suffix}") from exc
+        try:
+            if exc.code == 404:
+                raise BackendError(f"RIPE Atlas measurement {measurement_id} was not found or is not public (HTTP 404).") from exc
+            if exc.code in (401, 403):
+                raise BackendError(
+                    f"RIPE Atlas denied measurement {measurement_id} (HTTP {exc.code}); check whether it is public or configure RIPE_ATLAS_API_KEY."
+                ) from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            if exc.code == 429:
+                suffix = f"Retry-After={retry_after}" if retry_after else "respect the provider's rate limit"
+                raise BackendError(f"RIPE Atlas rate limit reached for measurement {measurement_id}; {suffix}.") from exc
+            suffix = f"; Retry-After={retry_after}" if retry_after else ""
+            raise BackendError(f"RIPE Atlas HTTP {exc.code} {exc.reason}{suffix}") from exc
+        finally:
+            try:
+                exc.close()
+            except Exception:
+                pass
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
         raise BackendError(f"RIPE Atlas network/TLS error: {reason}") from exc
