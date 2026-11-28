@@ -2,8 +2,19 @@ name: DGSM CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
   workflow_dispatch:
+
+# A push and pull_request event for the same feature branch validate one exact
+# head at a time. A newer head supersedes pending/older runs to avoid building
+# stale commits and starving the release pipeline of hosted runner capacity.
+concurrency:
+  group: dgsm-ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
