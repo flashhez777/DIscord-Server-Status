@@ -145,11 +145,13 @@ the Windows EXE/DLL. Windows CI uses an ephemeral self-signed certificate: it is
 not publicly trusted and does not provide SmartScreen reputation. Linux CI
 skips signing.
 
-The tag-triggered `.github/workflows/release.yml` workflow rebuilds target
-artifacts and publishes a GitHub Release with ZIPs, binaries, checksums,
-signing reports and release notes. Configure the protected `DGSM_PFX_BASE64`
-and `DGSM_PFX_PASSWORD` secrets to use a CA-issued Windows publisher
-certificate; without them, Windows uses the self-signed development certificate.
+The `.github/workflows/release.yml` workflow rebuilds target artifacts and
+publishes a GitHub Release with ZIPs, binaries, checksums, signing reports and
+release notes when a `vX.Y.Z` tag or `release/vX.Y.Z` branch is pushed.
+Unrelated branch pushes skip its release jobs. Configure the protected
+`DGSM_PFX_BASE64` and `DGSM_PFX_PASSWORD` secrets to use a CA-issued Windows
+publisher certificate; without them, Windows uses the self-signed development
+certificate.
 
 The workflow uses the current major releases of the official checkout,
 setup-python, and upload-artifact actions. <https://github.com/actions/setup-python>
