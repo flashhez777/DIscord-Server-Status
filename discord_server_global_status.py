@@ -710,11 +710,29 @@ def probe_rest_api(timeout: float) -> ProbeResult:
     try:
         data, _ = request_json(REST_GATEWAY_URL, timeout)
         gateway_url = data.get("url")
-        if not isinstance(gateway_url, str) or not gateway_url.startswith("wss://"):
-            return ProbeResult("REST API", "WARN", (time.perf_counter() - start) * 1000,
-                               "HTTP responded, but Gateway URL was missing")
+        try:
+            parsed_gateway = urlsplit(gateway_url) if isinstance(gateway_url, str) else None
+            gateway_port = parsed_gateway.port if parsed_gateway is not None else None
+        except ValueError:
+            parsed_gateway = None
+            gateway_port = None
+        valid_gateway_url = bool(
+            parsed_gateway is not None
+            and parsed_gateway.scheme.casefold() == "wss"
+            and (parsed_gateway.hostname or "").rstrip(".").casefold() == GATEWAY_HOST
+            and gateway_port in (None, 443)
+            and parsed_gateway.username is None
+            and parsed_gateway.password is None
+            and parsed_gateway.path in ("", "/")
+            and not parsed_gateway.fragment
+        )
+        if not valid_gateway_url:
+            return ProbeResult(
+                "REST API", "WARN", (time.perf_counter() - start) * 1000,
+                "HTTP responded, but returned an invalid or unexpected Gateway URL",
+            )
         return ProbeResult("REST API", "UP", (time.perf_counter() - start) * 1000,
-                           "GET /api/v10/gateway returned a valid Gateway URL")
+                           "GET /api/v10/gateway returned the expected Discord Gateway URL")
     except Exception as exc:
         return ProbeResult("REST API", "DOWN", (time.perf_counter() - start) * 1000, str(exc))
 
