@@ -1238,6 +1238,7 @@ def normalize_dns_answers(answers: Any, fallback_target: str) -> dict[str, Any]:
         "answers": rendered_answers,
         "answer_set": answer_set,
         "address_answers": sorted(set(address_answers)),
+        "address_answer_count": len(set(address_answers)),
         "answer_count": len(normalized_records),
         "ttl_min": min(ttl_values) if ttl_values else None,
         "ttl_max": max(ttl_values) if ttl_values else None,
@@ -1344,7 +1345,7 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
                 answer_state = "ERROR"
             elif not resolver_responded:
                 answer_state = "UNKNOWN"
-            elif successful_rcode and answer_count:
+            elif successful_rcode and dns_answers["address_answer_count"]:
                 answer_state = "RESOLVED"
             elif successful_rcode:
                 answer_state = "NODATA"
@@ -1360,15 +1361,22 @@ def normalize_globalping_result(test_type: str, target: str, data: dict[str, Any
             # the requested gateway A RRset contains usable addresses.
             if resolver_error or status_text == "SERVFAIL":
                 row["state"] = "DOWN"
-            elif not successful_rcode or answer_count == 0 or not dns_answers["validation_ok"]:
+            elif (
+                not successful_rcode
+                or dns_answers["address_answer_count"] == 0
+                or not dns_answers["validation_ok"]
+            ):
                 row["state"] = "WARN"
             else:
                 row["state"] = "UP"
 
             if resolver_error:
                 detail = f"DNS resolver error: {resolver_error}"
-            elif successful_rcode and answer_count == 0:
-                detail = f"DNS {status_text}/NODATA; resolver responded; 0 answer(s)"
+            elif successful_rcode and dns_answers["address_answer_count"] == 0:
+                detail = (
+                    f"DNS {status_text}/NODATA; resolver responded; "
+                    f"{dns_answers['answer_count']} record(s), 0 A/AAAA address answer(s)"
+                )
             else:
                 detail = f"DNS {status_text}; {answer_count} answer(s)"
             if dns_answers["ttl_conflicts"]:
