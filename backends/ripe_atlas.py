@@ -205,7 +205,7 @@ def normalize_results(measurement_id: int, records: list[dict[str, Any]]) -> dic
         avg = statistics.mean(rtts) if rtts else None
         loss = (100.0 * (sent - len(rtts)) / sent) if sent > 0 else None
         row = {
-            "probe_id": str(probe_id)[:32],
+            "probe_id": probe_id if isinstance(probe_id, int) and not isinstance(probe_id, bool) else str(probe_id)[:32],
             "source_ip": source_ip,
             "target": target,
             "timestamp": record.get("timestamp"),
