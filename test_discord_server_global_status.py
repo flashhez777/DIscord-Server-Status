@@ -341,6 +341,57 @@ class TelemetryTests(unittest.TestCase):
             [139, 300, 300, 175, 86],
         )
 
+    def test_globalping_dns_accepts_addresses_reached_through_cname_chain(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "CNAME", "ttl": 120,
+                     "value": "gateway.edge.example.net."},
+                    {"name": "gateway.edge.example.net.", "type": "A", "ttl": 90,
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "UP")
+        self.assertEqual(row["address_answers"], ["162.159.135.234"])
+
+    def test_globalping_dns_rejects_unrelated_address_records(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "unrelated.example.", "type": "A", "ttl": 60,
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["address_answer_count"], 0)
+        self.assertEqual(row["unrelated_address_answers"], 1)
+
+    def test_globalping_dns_missing_ttl_is_warned(self):
+        data = {"results": [{
+            "probe": {},
+            "result": {
+                "statusCode": 0,
+                "statusCodeName": "NOERROR",
+                "answers": [
+                    {"name": "gateway.discord.gg.", "type": "A",
+                     "value": "162.159.135.234"},
+                ],
+            },
+        }]}
+        row = monitor.normalize_globalping_result("dns", "gateway.discord.gg", data)["rows"][0]
+        self.assertEqual(row["state"], "WARN")
+        self.assertEqual(row["missing_ttls"], 1)
+
     def test_globalping_dns_invalid_a_record_is_ignored_and_warned(self):
         data = {"results": [{
             "probe": {},
