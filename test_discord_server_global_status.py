@@ -76,7 +76,7 @@ class TLSAndNetworkTests(unittest.TestCase):
         monitor.initialize_tls_context()
         payload = {"status": {"indicator": "none"}, "components": []}
         with mock.patch.object(
-            monitor.urllib.request, "safe_urlopen", return_value=FakeResponse(payload)
+            monitor, "safe_urlopen", return_value=FakeResponse(payload)
         ) as urlopen:
             data, elapsed = monitor.request_json("https://discordstatus.com/api/v2/summary.json", 2)
         self.assertEqual(data, payload)
@@ -87,7 +87,7 @@ class TLSAndNetworkTests(unittest.TestCase):
         monitor.initialize_tls_context()
         oversized = {"padding": "x" * (2 * 1024 * 1024)}
         with mock.patch.object(
-            monitor.urllib.request, "safe_urlopen", return_value=FakeResponse(oversized)
+            monitor, "safe_urlopen", return_value=FakeResponse(oversized)
         ):
             with self.assertRaisesRegex(monitor.MonitorError, "exceeded the 2 MiB response safety limit"):
                 monitor.request_json("https://discordstatus.com/api/v2/summary.json", 2)
@@ -96,7 +96,7 @@ class TLSAndNetworkTests(unittest.TestCase):
         monitor.initialize_tls_context()
         payload = {"ok": True}
         responses = [urllib.error.URLError("temporary"), FakeResponse(payload)]
-        with mock.patch.object(monitor.urllib.request, "safe_urlopen", side_effect=responses) as urlopen, \
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=responses) as urlopen, \
              mock.patch.object(monitor.time, "sleep"):
             result, _headers = monitor.globalping_request("GET", "https://api.globalping.io/v1/limits", 2)
         self.assertEqual(result, payload)
@@ -105,10 +105,10 @@ class TLSAndNetworkTests(unittest.TestCase):
     def test_globalping_post_is_not_retried(self):
         monitor.initialize_tls_context()
         with mock.patch.object(
-            monitor.urllib.request, "safe_urlopen", side_effect=urllib.error.URLError("temporary")
+            monitor, "safe_urlopen", side_effect=urllib.error.URLError("temporary")
         ) as urlopen:
             with self.assertRaises(monitor.MonitorError):
-                monitor.globalping_request("POST", "https://api.globalping.io/v1/limits", 2, payload={"type": "ping"})
+                monitor.globalping_request("POST", "https://api.globalping.io/v1/measurements", 2, payload={"type": "ping"})
         self.assertEqual(urlopen.call_count, 1)
 
     def test_globalping_429_surfaces_retry_after_without_retry_storm(self):
@@ -117,7 +117,7 @@ class TLSAndNetworkTests(unittest.TestCase):
             "https://api.globalping.io/v1/limits", 429, "Too Many Requests",
             {"Retry-After": "60"}, io.BytesIO(b'{"error":{"message":"limit reached"}}')
         )
-        with mock.patch.object(monitor.urllib.request, "safe_urlopen", side_effect=error) as urlopen:
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=error) as urlopen:
             with self.assertRaisesRegex(monitor.MonitorError, "Retry-After=60"):
                 monitor.globalping_request("GET", "https://api.globalping.io/v1/limits", 2)
         self.assertEqual(urlopen.call_count, 1)
@@ -548,7 +548,7 @@ class GlobalpingRequestSchemaTests(unittest.TestCase):
             {},
             io.BytesIO(body),
         )
-        with mock.patch.object(monitor.urllib.request, "safe_urlopen", side_effect=error):
+        with mock.patch.object(monitor, "safe_urlopen", side_effect=error):
             with self.assertRaises(monitor.MonitorError) as caught:
                 monitor.globalping_request(
                     "POST", "https://api.globalping.io/v1/measurements", 5,
