@@ -888,9 +888,9 @@ class WindowsBuildBootstrapTests(unittest.TestCase):
         root = Path(__file__).parent
         version = (root / "dgsm_version.py").read_text(encoding="utf-8")
         project = (root / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('__version__ = "3.4.4"', version)
+        self.assertIn('__version__ = "3.4.5"', version)
         self.assertIn('__version_info__ = (3, 4, 4)', version)
-        self.assertIn('version = "3.4.4"', project)
+        self.assertIn('version = "3.4.5"', project)
         self.assertIn("@DGSM_VERSION_TUPLE@", (root / "assets" / "version_info.txt").read_text(encoding="utf-8"))
         self.assertIn("@DGSM_VERSION_COMMA4@", (root / "assets" / "DGSM.rc").read_text(encoding="utf-8"))
 
