@@ -361,6 +361,7 @@ def bootstrap_optional_dependencies(args: argparse.Namespace, data_dir: Path) ->
         packages.append(("colorama", "colorama>=0.4.6", "0.4.6"))
 
     vendor_dir = data_dir / "vendor"
+    ensure_private_directory(vendor_dir)
     if str(vendor_dir) not in sys.path:
         sys.path.insert(0, str(vendor_dir))
 
@@ -1491,8 +1492,43 @@ def run_global_telemetry(test_type: str, args: argparse.Namespace) -> dict[str, 
         }
 
 
+def ensure_private_directory(path: Path) -> None:
+    """Create a private app data directory and reject a symlink at its leaf."""
+    path = path.expanduser()
+    if path.is_symlink():
+        raise MonitorError(f"Refusing to use a symlink as the DGSM data directory: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if not path.is_dir():
+        raise MonitorError(f"DGSM data path is not a directory: {path}")
+    if os.name != "nt":
+        os.chmod(path, 0o700)
+
+
+def _open_state_file(path: Path, mode: str):
+    """Open DGSM state files with POSIX 0600 permissions and no symlink following."""
+    path = Path(path)
+    if path.is_symlink():
+        raise OSError(f"Refusing to follow a symlink state file: {path}")
+    if mode == "r":
+        flags = os.O_RDONLY
+    elif mode == "a":
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    else:
+        raise ValueError("Unsupported DGSM state-file mode.")
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if os.name != "nt" and hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        return os.fdopen(descriptor, mode, encoding="utf-8")
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
 def append_telemetry_log(path: Path, measurement: dict[str, Any], max_bytes: int = 5_000_000) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     try:
         if path.exists() and path.stat().st_size > max_bytes:
             backup = path.with_suffix(".previous.jsonl")
@@ -1502,8 +1538,8 @@ def append_telemetry_log(path: Path, measurement: dict[str, Any], max_bytes: int
                 path.replace(backup)
             except OSError:
                 pass
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(measurement, ensure_ascii=False) + "\n")
+        with _open_state_file(path, "a") as handle:
+            handle.write(json.dumps(measurement, ensure_ascii=False, allow_nan=False) + "\n")
     except OSError as exc:
         print(f"Warning: could not write telemetry history: {exc}", file=sys.stderr)
 
@@ -1516,7 +1552,7 @@ def show_telemetry_history(path: Path, limit: int = 30) -> int:
         return 0
     rows: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _open_state_file(path, "r") as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
@@ -1529,9 +1565,13 @@ def show_telemetry_history(path: Path, limit: int = 30) -> int:
         return 1
     for sample in rows:
         summary = sample.get("summary") if isinstance(sample.get("summary"), dict) else {}
-        median = summary.get("median_ms")
-        latency = f"{median:.1f} ms median" if isinstance(median, (int, float)) else "no latency summary"
-        print(f"[{sample.get('completed_at', '?')}] {str(sample.get('type', '?')).upper():<10} {sample.get('target', '?'):<36} {latency}; probes={sample.get('probes_count', 0)}")
+        median = numeric(summary.get("median_ms"))
+        latency = f"{median:.1f} ms median" if median is not None else "no latency summary"
+        stamp = clip(sample.get("completed_at", "?"), 32)
+        test_type = clip(sample.get("type", "?"), 10).upper()
+        target = clip(sample.get("target", "?"), 36)
+        probes = numeric(sample.get("probes_count")) or 0
+        print(f"[{stamp}] {test_type:<10} {target:<36} {latency}; probes={probes:.0f}")
     return 0
 
 
@@ -1744,23 +1784,40 @@ def detect_changes(previous: Optional[dict[str, Any]], current: dict[str, Any]) 
 
 def load_json_file(path: Path) -> Optional[dict[str, Any]]:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        with _open_state_file(path, "r") as handle:
+            data = json.load(handle)
         return data if isinstance(data, dict) else None
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
 
 
 def save_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps(value, indent=2, ensure_ascii=False), encoding="utf-8")
-    temp.replace(path)
+    """Atomically write state through a unique private temporary file."""
+    ensure_private_directory(path.parent)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    descriptor_open = True
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            descriptor_open = False
+            handle.write(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    finally:
+        if descriptor_open:
+            os.close(descriptor)
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
 
 
 def append_event_log(path: Path, events: list[str], max_bytes: int = 2_000_000) -> None:
     if not events:
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(path.parent)
     try:
         if path.exists() and path.stat().st_size > max_bytes:
             backup = path.with_suffix(".previous.jsonl")
@@ -1770,9 +1827,11 @@ def append_event_log(path: Path, events: list[str], max_bytes: int = 2_000_000) 
                 path.replace(backup)
             except OSError:
                 pass
-        with path.open("a", encoding="utf-8") as handle:
+        with _open_state_file(path, "a") as handle:
             for event in events:
-                handle.write(json.dumps({"time": iso_now(), "event": event}, ensure_ascii=False) + "\n")
+                handle.write(json.dumps({
+                    "time": iso_now(), "event": clip(event, 2000)
+                }, ensure_ascii=False, allow_nan=False) + "\n")
     except OSError as exc:
         print(f"Warning: could not write event log: {exc}", file=sys.stderr)
 
@@ -1782,7 +1841,7 @@ def read_event_log(path: Path, limit: int = 25) -> list[dict[str, Any]]:
         return []
     rows: deque[dict[str, Any]] = deque(maxlen=limit)
     try:
-        with path.open("r", encoding="utf-8") as handle:
+        with _open_state_file(path, "r") as handle:
             for line in handle:
                 try:
                     row = json.loads(line)
@@ -2124,7 +2183,7 @@ def show_history(path: Path) -> int:
         print("No saved events yet.")
         return 0
     for row in rows:
-        print(f"[{row.get('time', '?')}] {row.get('event', '')}")
+        print(f"[{clip(row.get('time', '?'), 32)}] {clip(row.get('event', ''), 240)}")
     return 0
 
 
@@ -2136,7 +2195,7 @@ def main() -> int:
             sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except (OSError, ValueError):
         pass
-    data_dir = args.data_dir or state_directory()
+    data_dir = (args.data_dir or state_directory()).expanduser()
     state_path = data_dir / "last_state.json"
     event_path = data_dir / "events.jsonl"
     telemetry_path = data_dir / "worldwide_telemetry.jsonl"
@@ -2146,6 +2205,11 @@ def main() -> int:
     if args.telemetry_history:
         return show_telemetry_history(telemetry_path)
 
+    try:
+        ensure_private_directory(data_dir)
+    except Exception as exc:
+        print(f"Unsafe DGSM data directory: {exc}", file=sys.stderr)
+        return 2
     bootstrap_optional_dependencies(args, data_dir)
     try:
         initialize_tls_context(args.ca_bundle)
